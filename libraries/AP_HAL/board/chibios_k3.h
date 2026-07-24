@@ -38,7 +38,10 @@
 #define HAL_HAVE_SERVO_VOLTAGE 0
 #define HAL_HAVE_SAFETY_SWITCH 0
 
-// TODO(S3): switch to ChibiOS_K3::Semaphore / BinarySemaphore once the real
-// (ChibiOS-mutex-backed) implementations exist in AP_HAL_ChibiOS_K3.
-#define HAL_Semaphore Empty::Semaphore
-#define HAL_BinarySemaphore Empty::BinarySemaphore
+// Concrete Semaphore types for this board (mirrors AP_HAL/board/chibios.h,
+// which includes <AP_HAL_ChibiOS/Semaphores.h>). Pulling this header here also
+// makes AP_Common.h / WARN_IF_UNUSED available early enough for other AP_HAL
+// headers that expand HAL_Semaphore.
+#include <AP_HAL_ChibiOS_K3/Semaphores.h>
+#define HAL_Semaphore ChibiOS_K3::Semaphore
+#define HAL_BinarySemaphore ChibiOS_K3::BinarySemaphore

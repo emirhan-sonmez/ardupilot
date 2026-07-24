@@ -1416,6 +1416,7 @@ class GemstoneO1R5F(Board):
             # board's hwdef defaults cascade, which this hand-written board skips.
             AP_SCRIPTING_ENABLED = 0,      # no filesystem backend yet
             HAL_WITH_EKF_DOUBLE = 0,       # single-precision EKF on the R5F for now
+            HAL_NUM_CAN_IFACES = 0,        # K3 MCAN not ported yet (Phase 3b)
         )
         env.AP_LIBRARIES += [
             'AP_HAL_ChibiOS_K3',

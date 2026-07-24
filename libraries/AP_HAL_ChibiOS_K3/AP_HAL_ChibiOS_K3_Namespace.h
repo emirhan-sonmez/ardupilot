@@ -15,6 +15,7 @@
 */
 
 namespace ChibiOS_K3 {
-    // Populated as real implementations land. Kept empty on purpose for the
-    // all-Empty:: skeleton so nothing is forward-declared without a definition.
+    // Real implementations (declared as they land).
+    class Semaphore;
+    class BinarySemaphore;
 }
