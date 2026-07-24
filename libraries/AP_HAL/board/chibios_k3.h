@@ -50,10 +50,12 @@
 #define HAL_HAVE_SERVO_VOLTAGE 0
 #define HAL_HAVE_SAFETY_SWITCH 0
 
-// Concrete Semaphore types for this board (mirrors AP_HAL/board/chibios.h,
-// which includes <AP_HAL_ChibiOS/Semaphores.h>). Pulling this header here also
-// makes AP_Common.h / WARN_IF_UNUSED available early enough for other AP_HAL
-// headers that expand HAL_Semaphore.
+// Concrete Semaphore types for this board (mirrors AP_HAL/board/chibios.h).
+// Guarded by __cplusplus: this board header is also reached by C translation
+// units (e.g. the Lua sources via lua_common_defs.h -> AP_HAL_Boards.h), and the
+// Semaphore header is C++. Without the guard those C files fail to compile.
+#ifdef __cplusplus
 #include <AP_HAL_ChibiOS_K3/Semaphores.h>
 #define HAL_Semaphore ChibiOS_K3::Semaphore
 #define HAL_BinarySemaphore ChibiOS_K3::BinarySemaphore
+#endif
