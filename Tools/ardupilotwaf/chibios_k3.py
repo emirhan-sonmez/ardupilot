@@ -45,7 +45,31 @@ def configure(cfg):
 
     cfg.msg('AM67 ChibiOS port', ch_root)
 
+    # Generate the ChibiOS include-dir list now (via `make pass`) and add it to
+    # INCLUDES at LOW priority (appended last, so AP headers win any name clash).
+    # This lets the backend files that use ch.h (system/Semaphores/Scheduler/UART)
+    # find the ChibiOS headers.
+    builddir = cfg.bldnode.make_node('libch')
+    builddir.mkdir()
+    make = env.MAKE[0] if isinstance(env.MAKE, list) else env.MAKE
+    subprocess.check_call([
+        make, '-r', '-f', env.CH_K3_BOARD_MK, 'pass',
+        'CHIBIOS=' + ch_root, 'HWDEF_DIR=' + hwdef,
+        'BUILDDIR=' + builddir.abspath()])
+    inc_dirs = [d.strip() for d in
+                builddir.make_node('include_dirs').read().splitlines() if d.strip()]
+    env.CH_K3_INCLUDES = inc_dirs
+    env.INCLUDES = list(env.INCLUDES) + inc_dirs
+    cfg.msg('ChibiOS include dirs', str(len(inc_dirs)))
+
     env.AP_PROGRAM_FEATURES += ['ch_k3_program']
+
+    # libap.a (AP) and libch.a (ChibiOS) reference each other (AP -> ChibiOS
+    # symbols; ChibiOS crt0 -> main). Wrap the static libs in a group so the
+    # linker re-scans them until stable, independent of order. No dynamic libs in
+    # a bare-metal link, so repurposing the STLIB/SHLIB markers is safe.
+    env.STLIB_MARKER = '-Wl,--start-group'
+    env.SHLIB_MARKER = '-Wl,--end-group'
 
     # R5F machine flags: must match the libch.a compile so libgcc/libc multilib
     # selection agrees at link time.

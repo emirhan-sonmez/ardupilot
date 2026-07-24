@@ -20,4 +20,5 @@ namespace ChibiOS_K3 {
     class BinarySemaphore;
     class Scheduler;
     class Util;
+    class UARTDriver;
 }

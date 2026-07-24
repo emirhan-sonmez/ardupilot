@@ -3,14 +3,14 @@
 #if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
 
 #include <AP_HAL/system.h>
+#include <ch.h>
 
 /*
-  AP_HAL:: system services for the AM67/K3 board.
+  AP_HAL:: system services for the AM67/K3 board, backed by ChibiOS/RT time.
 
-  M2 bring-up: the time sources are stubs returning 0. They exist to satisfy the
-  link and are NOT functional. S3 wires them to the ChibiOS system time
-  (chVTGetSystemTimeX + TIME_I2MS/TIME_I2US), which needs ch.h on the include
-  path. panic() honestly halts (no console yet); S3 prints + reboots.
+  The systick runs at CH_CFG_ST_FREQUENCY (1000 Hz -> 1 tick == 1 ms). The 32-bit
+  helpers read the system time counter directly (chVTGetSystemTimeX, no lock);
+  the 64-bit helpers use the wrap-free timestamp (CH_CFG_USE_TIMESTAMP).
 */
 
 namespace AP_HAL {
@@ -22,38 +22,39 @@ void init()
 void panic(const char *errormsg, ...)
 {
     (void)errormsg;
-    // Honest halt: spin forever. Nothing to print to yet.
-    while (true) { }
+    // No console guaranteed here; halt honestly.
+    while (true) {
+    }
 }
 
 uint32_t micros()
 {
-    return 0;
+    return (uint32_t)TIME_I2US(chVTGetSystemTimeX());
 }
 
 uint32_t millis()
 {
-    return 0;
+    return (uint32_t)TIME_I2MS(chVTGetSystemTimeX());
 }
 
 uint16_t micros16()
 {
-    return 0;
+    return (uint16_t)(micros() & 0xFFFFU);
 }
 
 uint16_t millis16()
 {
-    return 0;
+    return (uint16_t)(millis() & 0xFFFFU);
 }
 
 uint64_t micros64()
 {
-    return 0;
+    return (uint64_t)chVTGetTimeStamp() * 1000000ULL / CH_CFG_ST_FREQUENCY;
 }
 
 uint64_t millis64()
 {
-    return 0;
+    return (uint64_t)chVTGetTimeStamp() * 1000ULL / CH_CFG_ST_FREQUENCY;
 }
 
 } // namespace AP_HAL

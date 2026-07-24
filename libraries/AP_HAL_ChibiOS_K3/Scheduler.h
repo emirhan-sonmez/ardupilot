@@ -6,12 +6,10 @@
 /*
   Scheduler for the AM67/K3 ChibiOS backend.
 
-  NOTE (S2): the .cpp bodies are minimal stubs so the tree compiles and links.
-  They are NOT functional (delay does not delay, timer/io procs are stored but
-  never run, threads are not created). S3 replaces them with real ChibiOS/RT
-  logic (chThdSleep* for delay, chThdCreateStatic for threads, a virtual-timer
-  or dedicated thread for the timer/io process lists), which needs ch.h from the
-  chibios_k3 make-integration.
+  M3 scope: enough for the UART_test example. init() brings up ChibiOS
+  (halInit + chSysInit); delay/delay_microseconds use chThdSleep*. The timer/io
+  process lists are stored but NOT yet serviced (UART_test does not need periodic
+  callbacks) — a later step adds the timer thread/VT that runs them.
 */
 class ChibiOS_K3::Scheduler : public AP_HAL::Scheduler {
 public:
@@ -28,4 +26,6 @@ public:
 
 private:
     bool _initialized;
+    // ChibiOS main thread handle (opaque thread_t*), set in init().
+    void *_main_thread;
 };

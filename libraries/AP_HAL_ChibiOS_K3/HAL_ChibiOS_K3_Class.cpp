@@ -20,9 +20,13 @@
 #include "Scheduler.h"
 #include "Semaphores.h"
 #include "Util.h"
+#include "UARTDriver.h"
+#include <hal.h>   // for the ChibiOS SerialDriver SD1
 
-// --- driver instances (all Empty:: for now) ---
-static Empty::UARTDriver serial0Driver;   // console  <- becomes ChibiOS_K3 in S3
+// --- driver instances ---
+// serial0 = console on the AM67 ChibiOS SerialDriver SD1 (40-pin header UART).
+static ChibiOS_K3::UARTDriver serial0Driver((void *)&SD1);
+// The remaining serials have no wired hardware yet -> Empty:: stubs.
 static Empty::UARTDriver serial1Driver;
 static Empty::UARTDriver serial2Driver;
 static Empty::UARTDriver serial3Driver;

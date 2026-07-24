@@ -3,60 +3,90 @@
 #if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
 
 #include "Semaphores.h"
+#include <ch.h>
+
+extern const AP_HAL::HAL &hal;
 
 using namespace ChibiOS_K3;
 
 /*
-  S2 TEMP no-op stub: no real locking. This is enough to compile, link and boot
-  single-threaded during bring-up. It is NOT thread-safe.
-
-  S3 replaces these bodies with real ChibiOS logic (chMtxObjectInit/chMtxLock/
-  chMtxUnlock for Semaphore; chBSemObjectInit/chBSemWaitTimeout/chBSemSignal for
-  BinarySemaphore), casting the opaque _lock/_bsem storage to the ChibiOS
-  mutex_t / binary_semaphore_t types. That step requires ch.h, which the
-  chibios_k3 make-integration puts on the include path.
+  Real ChibiOS-backed Semaphore/BinarySemaphore. The opaque _lock/_bsem storage
+  (declared in Semaphores.h) is reinterpreted as the ChibiOS types here so that
+  ch.h stays out of the header. Mirrors AP_HAL_ChibiOS/Semaphores.cpp.
 */
+
+// ---- Semaphore (priority-inheritance mutex) ----
 
 Semaphore::Semaphore()
 {
-    _lock[0] = 0;
+    static_assert(sizeof(_lock) >= sizeof(mutex_t), "invalid mutex size");
+    mutex_t *mtx = (mutex_t *)_lock;
+    chMtxObjectInit(mtx);
 }
 
 bool Semaphore::give()
 {
+    mutex_t *mtx = (mutex_t *)_lock;
+    chMtxUnlock(mtx);
     return true;
 }
 
 bool Semaphore::take(uint32_t timeout_ms)
 {
-    (void)timeout_ms;
-    return true;
+    mutex_t *mtx = (mutex_t *)_lock;
+    if (timeout_ms == HAL_SEMAPHORE_BLOCK_FOREVER) {
+        chMtxLock(mtx);
+        return true;
+    }
+    if (take_nonblocking()) {
+        return true;
+    }
+    uint64_t start = AP_HAL::micros64();
+    do {
+        hal.scheduler->delay_microseconds(200);
+        if (take_nonblocking()) {
+            return true;
+        }
+    } while ((AP_HAL::micros64() - start) < timeout_ms * 1000);
+    return false;
 }
 
 bool Semaphore::take_nonblocking()
 {
-    return true;
+    mutex_t *mtx = (mutex_t *)_lock;
+    return chMtxTryLock(mtx);
 }
+
+// ---- BinarySemaphore ----
 
 BinarySemaphore::BinarySemaphore(bool initial_state) :
     AP_HAL::BinarySemaphore(initial_state)
 {
-    _bsem[0] = initial_state ? 1 : 0;
+    static_assert(sizeof(_bsem) >= sizeof(binary_semaphore_t), "invalid bsem size");
+    binary_semaphore_t *sem = (binary_semaphore_t *)_bsem;
+    // ChibiOS "taken" flag is the inverse of "signalled/available".
+    chBSemObjectInit(sem, !initial_state);
 }
 
 bool BinarySemaphore::wait(uint32_t timeout_us)
 {
-    (void)timeout_us;
-    return true;
+    binary_semaphore_t *sem = (binary_semaphore_t *)_bsem;
+    if (timeout_us == 0) {
+        return chBSemWaitTimeout(sem, TIME_IMMEDIATE) == MSG_OK;
+    }
+    return chBSemWaitTimeout(sem, TIME_US2I(timeout_us)) == MSG_OK;
 }
 
 bool BinarySemaphore::wait_blocking()
 {
-    return true;
+    binary_semaphore_t *sem = (binary_semaphore_t *)_bsem;
+    return chBSemWait(sem) == MSG_OK;
 }
 
 void BinarySemaphore::signal()
 {
+    binary_semaphore_t *sem = (binary_semaphore_t *)_bsem;
+    chBSemSignal(sem);
 }
 
-#endif  // CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
+#endif // CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
