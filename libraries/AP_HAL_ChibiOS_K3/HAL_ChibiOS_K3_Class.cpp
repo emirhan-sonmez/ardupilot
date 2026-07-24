@@ -24,10 +24,12 @@
 #include <hal.h>   // for the ChibiOS SerialDriver SD1
 
 // --- driver instances ---
-// serial0 = console on the AM67 ChibiOS SerialDriver SD1 (40-pin header UART).
+// The AM67 port implements a single physical UART (SD1 = UART1, 40-pin header
+// pins 8/10). Map BOTH AP serial0 (console) and serial1 onto it so UART_test
+// prints its SERIAL0 and SERIAL1 lines out that one port. serials 2-9 have no
+// wired hardware yet -> Empty:: stubs.
 static ChibiOS_K3::UARTDriver serial0Driver((void *)&SD1);
-// The remaining serials have no wired hardware yet -> Empty:: stubs.
-static Empty::UARTDriver serial1Driver;
+static ChibiOS_K3::UARTDriver serial1Driver((void *)&SD1);
 static Empty::UARTDriver serial2Driver;
 static Empty::UARTDriver serial3Driver;
 static Empty::UARTDriver serial4Driver;
