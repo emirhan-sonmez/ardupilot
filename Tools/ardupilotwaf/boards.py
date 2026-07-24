@@ -1411,9 +1411,13 @@ class GemstoneO1R5F(Board):
         env.DEFINES.update(
             CONFIG_HAL_BOARD = 'HAL_BOARD_CHIBIOS_K3',
             CONFIG_HAL_BOARD_SUBTYPE = 'HAL_BOARD_SUBTYPE_CHIBIOS_K3_GEMSTONE_O1',
+            AP_SIM_ENABLED = 0,
         )
         env.AP_LIBRARIES += [
             'AP_HAL_ChibiOS_K3',
+            # S2 skeleton serves every interface with Empty:: stubs; drop this
+            # once all interfaces have real ChibiOS_K3 implementations.
+            'AP_HAL_Empty',
         ]
         # Cortex-R5F flags mirroring the RT-GEMSTONE-O1-R5F ChibiOS demo Makefile
         # (MCU=cortex-r5, USE_FPU=hard, ARM mode). vfpv3-d16 is the R5F FPU.
