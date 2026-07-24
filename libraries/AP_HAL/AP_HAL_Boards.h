@@ -16,6 +16,8 @@
 // #define HAL_BOARD_F4LIGHT  11 // reserved
 #define HAL_BOARD_ESP32	   12
 #define HAL_BOARD_QURT     13
+// TI AM67 / J722S Cortex-R5F running ChibiOS/RT (new non-STM32 AP_HAL backend)
+#define HAL_BOARD_CHIBIOS_K3 14
 #define HAL_BOARD_EMPTY    99
 // @LoggerEnumEnd
 
@@ -78,6 +80,9 @@
 // #define HAL_BOARD_SUBTYPE_ESP32_S3EMPTY         6008
 // #define HAL_BOARD_SUBTYPE_ESP32_S3M5STAMPFLY    6009
 // #define HAL_BOARD_SUBTYPE_ESP32_IMU_MODULE_V11  6010
+
+// TI K3 / AM67 ChibiOS boards
+#define HAL_BOARD_SUBTYPE_CHIBIOS_K3_GEMSTONE_O1   7100
 // @LoggerEnumEnd
 
 /* InertialSensor driver types */
@@ -142,6 +147,8 @@
     #include <AP_HAL/board/esp32.h>
 #elif CONFIG_HAL_BOARD == HAL_BOARD_QURT
     #include <AP_HAL/board/qurt.h>
+#elif CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
+    #include <AP_HAL/board/chibios_k3.h>
 #else
 #error "Unknown CONFIG_HAL_BOARD type"
 #endif

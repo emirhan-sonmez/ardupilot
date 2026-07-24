@@ -1382,6 +1382,52 @@ class chibios(Board):
     def get_name(self):
         return self.name
 
+class GemstoneO1R5F(Board):
+    '''
+    TI AM67 / J722S Cortex-R5F running ChibiOS/RT.
+
+    A NEW, non-STM32 AP_HAL backend (Strategy A): it does NOT use the STM32-only
+    ChibiOS hwdef generator. Instead it drives the ChibiOS `make` build against the
+    hand-written AM67 port (os/hal/ports/TI/AM67, board T3_GEMSTONE_O1_R5F) and the
+    AP_HAL_ChibiOS_K3 backend library.
+
+    WORK IN PROGRESS (Phase 2 / S1): configure_env() below defines the target but the
+    ChibiOS make-integration (a `chibios_k3` waf tool + a hand-written hwdef.h and
+    chibios_board.mk) is not wired yet, so `waf configure --board GemstoneO1R5F` will
+    not produce a firmware until S1 is complete. The board already lists, which is the
+    S1 first milestone: ArduPilot's build system now recognises the target.
+    '''
+    name = 'GemstoneO1R5F'
+    toolchain = 'arm-none-eabi'
+
+    def __init__(self):
+        super(GemstoneO1R5F, self).__init__()
+        # K3 MCAN is not ported yet (Phase 3b); AP_Periph 3a is the CAN-less milestone.
+        self.with_can = False
+
+    def configure_env(self, cfg, env):
+        super(GemstoneO1R5F, self).configure_env(cfg, env)
+        env.BOARD_CLASS = "CHIBIOS_K3"
+        env.DEFINES.update(
+            CONFIG_HAL_BOARD = 'HAL_BOARD_CHIBIOS_K3',
+            CONFIG_HAL_BOARD_SUBTYPE = 'HAL_BOARD_SUBTYPE_CHIBIOS_K3_GEMSTONE_O1',
+        )
+        env.AP_LIBRARIES += [
+            'AP_HAL_ChibiOS_K3',
+        ]
+        # Cortex-R5F flags mirroring the RT-GEMSTONE-O1-R5F ChibiOS demo Makefile
+        # (MCU=cortex-r5, USE_FPU=hard, ARM mode). vfpv3-d16 is the R5F FPU.
+        cpuflags = [
+            '-mcpu=cortex-r5',
+            '-mfpu=vfpv3-d16',
+            '-mfloat-abi=hard',
+            '-marm',
+        ]
+        env.CFLAGS += cpuflags
+        env.CXXFLAGS += cpuflags
+        # TODO(S1): cfg.load('chibios_k3') -- waf tool that runs the ChibiOS make build
+        #           (CH_ROOT -> our AM67 port) and links the AP objects against it.
+
 class LinuxBoard(Board):
     '''an abstract base class for Linux boards to inherit from'''
     abstract = True
