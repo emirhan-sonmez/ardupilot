@@ -1412,6 +1412,10 @@ class GemstoneO1R5F(Board):
             CONFIG_HAL_BOARD = 'HAL_BOARD_CHIBIOS_K3',
             CONFIG_HAL_BOARD_SUBTYPE = 'HAL_BOARD_SUBTYPE_CHIBIOS_K3_GEMSTONE_O1',
             AP_SIM_ENABLED = 0,
+            # Minimal feature set for bring-up: these are normally supplied by a
+            # board's hwdef defaults cascade, which this hand-written board skips.
+            AP_SCRIPTING_ENABLED = 0,      # no filesystem backend yet
+            HAL_WITH_EKF_DOUBLE = 0,       # single-precision EKF on the R5F for now
         )
         env.AP_LIBRARIES += [
             'AP_HAL_ChibiOS_K3',
