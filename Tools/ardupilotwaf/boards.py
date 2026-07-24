@@ -1442,8 +1442,15 @@ class GemstoneO1R5F(Board):
         ]
         env.CFLAGS += cpuflags
         env.CXXFLAGS += cpuflags
-        # TODO(S1): cfg.load('chibios_k3') -- waf tool that runs the ChibiOS make build
-        #           (CH_ROOT -> our AM67 port) and links the AP objects against it.
+        # Build the AM67 ChibiOS port into libch.a and link the AP objects against
+        # it (see Tools/ardupilotwaf/chibios_k3.py + AP_HAL_ChibiOS_K3/hwdef).
+        cfg.load('chibios_k3')
+
+    def build(self, bld):
+        super(GemstoneO1R5F, self).build(bld)
+        # Invokes chibios_k3.py build() (creates the libch.a make task) and the
+        # ch_k3_program link wiring.
+        bld.load('chibios_k3')
 
 class LinuxBoard(Board):
     '''an abstract base class for Linux boards to inherit from'''
