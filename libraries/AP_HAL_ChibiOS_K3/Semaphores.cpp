@@ -12,9 +12,9 @@ using namespace ChibiOS_K3;
 
   S3 replaces these bodies with real ChibiOS logic (chMtxObjectInit/chMtxLock/
   chMtxUnlock for Semaphore; chBSemObjectInit/chBSemWaitTimeout/chBSemSignal for
-  BinarySemaphore), casting _lock/_bsem to mutex_t*/binary_semaphore_t*. That
-  step requires ch.h, which the chibios_k3 make-integration puts on the include
-  path.
+  BinarySemaphore), casting the opaque _lock/_bsem storage to the ChibiOS
+  mutex_t / binary_semaphore_t types. That step requires ch.h, which the
+  chibios_k3 make-integration puts on the include path.
 */
 
 Semaphore::Semaphore()

@@ -18,4 +18,6 @@ namespace ChibiOS_K3 {
     // Real implementations (declared as they land).
     class Semaphore;
     class BinarySemaphore;
+    class Scheduler;
+    class Util;
 }

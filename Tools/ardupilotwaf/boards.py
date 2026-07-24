@@ -1406,7 +1406,18 @@ class GemstoneO1R5F(Board):
         self.with_can = False
 
     def configure_env(self, cfg, env):
+        # Disable scripting at the BUILD level (not just the code define) so the
+        # Lua sources are not compiled during bring-up. Must be set before the
+        # base configure_env, which decides scripting from these options.
+        cfg.options.disable_scripting = True
         super(GemstoneO1R5F, self).configure_env(cfg, env)
+        # The base configure_env adds the Lua sources to AP_LIBRARIES
+        # unconditionally; drop them so the Lua .c files are not compiled during
+        # bring-up (they otherwise trip the AP_Common/missing type_traits shim in
+        # C mode). Scripting is off anyway (AP_SCRIPTING_ENABLED=0).
+        for _lib in ('AP_Scripting', 'AP_Scripting/lua/src'):
+            if _lib in env.AP_LIBRARIES:
+                env.AP_LIBRARIES.remove(_lib)
         env.BOARD_CLASS = "CHIBIOS_K3"
         env.DEFINES.update(
             CONFIG_HAL_BOARD = 'HAL_BOARD_CHIBIOS_K3',
@@ -1417,6 +1428,7 @@ class GemstoneO1R5F(Board):
             AP_SCRIPTING_ENABLED = 0,      # no filesystem backend yet
             HAL_WITH_EKF_DOUBLE = 0,       # single-precision EKF on the R5F for now
             HAL_NUM_CAN_IFACES = 0,        # K3 MCAN not ported yet (Phase 3b)
+            HAL_GYROFFT_ENABLED = 0,       # no DSP backend -> also sets HAL_WITH_DSP=0
         )
         env.AP_LIBRARIES += [
             'AP_HAL_ChibiOS_K3',

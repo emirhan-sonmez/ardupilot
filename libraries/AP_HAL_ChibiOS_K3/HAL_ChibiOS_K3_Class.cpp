@@ -16,6 +16,11 @@
 #include <AP_HAL_Empty/AP_HAL_Empty.h>
 #include <AP_HAL_Empty/AP_HAL_Empty_Private.h>
 
+// Our own (non-Empty) implementations
+#include "Scheduler.h"
+#include "Semaphores.h"
+#include "Util.h"
+
 // --- driver instances (all Empty:: for now) ---
 static Empty::UARTDriver serial0Driver;   // console  <- becomes ChibiOS_K3 in S3
 static Empty::UARTDriver serial1Driver;
@@ -35,8 +40,8 @@ static Empty::Storage storageDriver;
 static Empty::GPIO gpioDriver;
 static Empty::RCInput rcinDriver;
 static Empty::RCOutput rcoutDriver;
-static Empty::Scheduler schedulerInstance;  // becomes ChibiOS_K3 in S3
-static Empty::Util utilInstance;            // becomes ChibiOS_K3 in S3
+static ChibiOS_K3::Scheduler schedulerInstance;  // real (stub bodies until S3)
+static ChibiOS_K3::Util utilInstance;            // real (stub bodies until S3)
 static Empty::OpticalFlow opticalFlowDriver;
 static Empty::Flash flashDriver;
 

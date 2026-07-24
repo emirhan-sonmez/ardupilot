@@ -27,6 +27,18 @@
 // No IMU wired to the HAL yet (sensor drivers arrive during driver hardening).
 #define HAL_INS_DEFAULT HAL_INS_NONE
 
+// Board directory macros (no real filesystem yet; these satisfy AP_Logger /
+// AP_Terrain / storage code paths until a storage backend lands).
+#ifndef HAL_BOARD_STORAGE_DIRECTORY
+#define HAL_BOARD_STORAGE_DIRECTORY "APM"
+#endif
+#ifndef HAL_BOARD_LOG_DIRECTORY
+#define HAL_BOARD_LOG_DIRECTORY "APM/logs"
+#endif
+#ifndef HAL_BOARD_TERRAIN_DIRECTORY
+#define HAL_BOARD_TERRAIN_DIRECTORY "APM/terrain"
+#endif
+
 #define CONFIG_HAL_BOARD_SUBTYPE HAL_BOARD_SUBTYPE_CHIBIOS_K3_GEMSTONE_O1
 
 // Currently linked/run from DDR; generous limit until the memory map is finalised.
