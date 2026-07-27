@@ -26,11 +26,10 @@
 
 // --- driver instances ---
 // The AM67 port implements a single physical UART (SD1 = UART1, 40-pin header
-// pins 8/10). Map BOTH AP serial0 (console) and serial1 onto it so UART_test
-// prints its SERIAL0 and SERIAL1 lines out that one port. serials 2-9 have no
-// wired hardware yet -> Empty:: stubs.
+// pins 8/10). Only AP serial0 (console) maps to it. serial1-9 have no wired
+// hardware yet -> Empty:: (null) stubs, so nothing else contends for SD1.
 static ChibiOS_K3::UARTDriver serial0Driver((void *)&SD1);
-static ChibiOS_K3::UARTDriver serial1Driver((void *)&SD1);
+static Empty::UARTDriver serial1Driver;
 static Empty::UARTDriver serial2Driver;
 static Empty::UARTDriver serial3Driver;
 static Empty::UARTDriver serial4Driver;
@@ -98,7 +97,9 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
     scheduler->init();               // halInit() + chSysInit()
     trace_printf("AP-K3: scheduler->init done\n");
 
-    serial(0)->begin(115200);
+    /* Open the console at 57600 to match the baud the example's setup()
+       re-opens with (and the user's terminal). */
+    serial(0)->begin(57600);
     trace_printf("AP-K3: serial0 begun\n");
 
     callbacks->setup();
