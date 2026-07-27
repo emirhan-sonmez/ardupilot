@@ -92,6 +92,13 @@ def configure(cfg):
         # passed. Pulling one symbol pulls the whole object (all syscalls +
         # __dso_handle + _fini).
         '-Wl,-u,_sbrk',
+        # Force the RemoteProc resource table (rsc_table.c) to be pulled from
+        # libch.a. Nothing in ArduPilot references it, so without this the
+        # archive member is never linked and the ELF ships with no
+        # .resource_table section -> the K3 remoteproc core will not start the
+        # firmware (and no trace0 appears). The ld script KEEP()s the section
+        # once the object is in the link.
+        '-Wl,-u,resource_table',
     ]
 
 

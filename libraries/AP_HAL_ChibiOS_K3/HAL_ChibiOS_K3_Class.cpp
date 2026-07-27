@@ -22,6 +22,7 @@
 #include "Util.h"
 #include "UARTDriver.h"
 #include <hal.h>   // for the ChibiOS SerialDriver SD1
+#include "hwdef/boot/trace.h"  // RemoteProc trace buffer (readable without UART)
 
 // --- driver instances ---
 // The AM67 port implements a single physical UART (SD1 = UART1, 40-pin header
@@ -81,11 +82,27 @@ HAL_ChibiOS_K3::HAL_ChibiOS_K3() :
 
 void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) const
 {
+    (void)argc;
+    (void)argv;
+
+    /* --- bring-up diagnostics (M3) ---------------------------------------
+       The RemoteProc trace buffer is readable on the Linux host at
+       /sys/kernel/debug/remoteproc/remoteprocN/trace0 and does NOT depend on
+       the UART pins. A *fresh* build stamp appearing there proves this ELF
+       actually loaded (rather than a stale image still running). The
+       breadcrumbs then show how far boot gets even if the console is silent. */
+    trace_init();
+    trace_printf("AP-K3: run() entry, build %s %s\n", __DATE__, __TIME__);
+
     /* Initialise drivers in a sane order. Scheduler first, then the console. */
-    scheduler->init();
+    scheduler->init();               // halInit() + chSysInit()
+    trace_printf("AP-K3: scheduler->init done\n");
+
     serial(0)->begin(115200);
+    trace_printf("AP-K3: serial0 begun\n");
 
     callbacks->setup();
+    trace_printf("AP-K3: setup() returned\n");
     scheduler->set_system_initialized();
 
     for (;;) {
