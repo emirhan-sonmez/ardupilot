@@ -23,7 +23,6 @@
 #include "UARTDriver.h"
 #include "RCOutput.h"
 #include <hal.h>   // for the ChibiOS SerialDriver SD1
-#include <ch.h>    // chnWriteTimeout / TIME_IMMEDIATE for the direct SD1 probe
 #include "hwdef/boot/trace.h"  // RemoteProc trace buffer (readable without UART)
 
 // --- driver instances ---
@@ -104,25 +103,11 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
     serial(0)->begin(57600);
     trace_printf("AP-K3: serial0 begun\n");
 
-    /* UART diagnosis: write directly to the ChibiOS SD1, bypassing the AP
-       console/BetterStream path, and report SD1 state + how many bytes the
-       driver accepted. This isolates "is SD1 TX actually working" from "is
-       hal.console wired/flushing". TIME_IMMEDIATE so it never blocks. */
-    {
-        static const char probe[] = "\r\nAP-K3 direct SD1 probe\r\n";
-        size_t n = chnWriteTimeout(&SD1, (const uint8_t *)probe,
-                                   sizeof(probe) - 1U, TIME_IMMEDIATE);
-        trace_printf("AP-K3: SD1 state=%u direct-write accepted=%u bytes\n",
-                     (uint32_t)SD1.state, (uint32_t)n);
-    }
-
     callbacks->setup();
     trace_printf("AP-K3: setup() returned\n");
     scheduler->set_system_initialized();
 
-    uint32_t loop_count = 0;
     for (;;) {
-        trace_printf("AP-K3: -> loop() #%u\n", loop_count++);
         callbacks->loop();
     }
 }
