@@ -21,4 +21,5 @@ namespace ChibiOS_K3 {
     class Scheduler;
     class Util;
     class UARTDriver;
+    class RCOutput;
 }
