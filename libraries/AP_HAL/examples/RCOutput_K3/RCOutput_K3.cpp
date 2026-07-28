@@ -1,24 +1,22 @@
 /*
-  Safe UART-controlled ESC test for the AM67/J722S K3 backend.
+  Walking-channel diagnostic for the six-channel AM67/J722S K3 RCOutput.
 
-  RCOutput channel 0 -> EPWM0_A -> Gemstone 40-pin header pin 29, 50 Hz.
+  Channel -> peripheral/output -> Gemstone 40-pin header pin:
+    ch0 -> EHRPWM0_A  -> pin 29     ch3 -> ECAP0 APWM -> pin 32
+    ch1 -> EHRPWM1_A  -> pin 31     ch4 -> ECAP1 APWM -> pin 36
+    ch2 -> EHRPWM1_B  -> pin 33     ch5 -> ECAP2 APWM -> pin 12
 
-  Arms at 1000 us and stays there until a valid single-character command is
-  received on SERIAL0 (57600 8N1). Commands latch. Output is clamped to
-  1000-2000 us in this test. Keys 0-9 step across the range:
+  All six start at 1000 us. Each channel in turn is raised to 1200 us for 2 s
+  and then returned to 1000 us, walking ch0..ch5 and repeating. Every
+  non-selected channel stays at 1000 us.
 
-    0 -> 1000   2 -> 1200   4 -> 1400   6 -> 1600   8 -> 1800
-    1 -> 1100   3 -> 1300   5 -> 1500   7 -> 1700   9 -> 2000
-    s -> 1000 (idle)        x -> 1000 (immediate safety)
+  Bench prerequisite (temporary Linux-assisted clocks): enable a Linux pwm
+  channel on each of the five peripherals first (23000000/23010000.pwm and
+  23100000/23110000/23120000.ecap) so their time bases are clocked; each
+  RCOutput channel waits for its counter to advance and is skipped if that
+  peripheral's clock never starts. Pin 8 (UART TX) is untouched.
 
-  CR/LF/space are ignored; any other character leaves the output unchanged and
-  prints an "invalid command" message. UART reads are non-blocking.
-
-  Bench prerequisite (temporary Linux-assisted tbclk): enable a Linux pwm
-  channel on 23000000.pwm first so the EPWM time base is clocked; enable_ch(0)
-  waits for the running counter before programming EPWM0.
-
-  SAFETY: keep a propeller off. This now spans full throttle (up to 2000 us).
+  SAFETY: keep propellers off.
 */
 #include <AP_HAL/AP_HAL.h>
 
@@ -34,82 +32,48 @@ void loop();
 
 const AP_HAL::HAL& hal = AP_HAL::get_HAL();
 
-// Test-application limits (independent of any HAL clamp).
-static const uint16_t ESC_MIN_US = 1000;
-static const uint16_t ESC_MAX_US = 2000;
-
-static uint16_t current_us = ESC_MIN_US;   // latched output, armed low
-
-// Map a command character to a target pulse width. Returns false if the
-// character is not a throttle/safety command (CR/LF/space handled separately).
-// Keys 0-9 step 1000..2000 us (100 us apart, 9 lands on full 2000).
-static bool map_command(char c, uint16_t &out_us)
-{
-    if (c >= '0' && c <= '9') {
-        out_us = (uint16_t)(1000U + (uint16_t)(c - '0') * 100U);  // 9 -> 1900
-        if (c == '9') {
-            out_us = 2000;                                        // top out at 2000
-        }
-        return true;
-    }
-    switch (c) {
-    case 's': out_us = 1000; return true;   // idle
-    case 'x': out_us = 1000; return true;   // immediate safety
-    default:  return false;
-    }
-}
-
-static void apply_us(char c, uint16_t us)
-{
-    // Strictly clamp to the test range regardless of source.
-    if (us < ESC_MIN_US) { us = ESC_MIN_US; }
-    if (us > ESC_MAX_US) { us = ESC_MAX_US; }
-    current_us = us;
-    hal.rcout->write(0, current_us);
-    hal.console->printf("Command %c -> RCOutput ch0 = %u us\r\n",
-                        c, (unsigned)current_us);
-    RC_TRACE("esc: cmd %c -> %u us\n", c, (unsigned)current_us);
-}
+static const uint8_t  NUM_CH   = 6;
+static const uint16_t IDLE_US  = 1000;
+static const uint16_t WALK_US  = 1200;
 
 void setup(void)
 {
-    RC_TRACE("esc: setup()\n");
-    hal.console->printf("\r\nAP-K3 UART-controlled ESC test: ch0 -> EPWM0_A -> pin 29\r\n");
-    hal.console->printf("cmds: 0..9 = 1000..2000 us (100 us steps, 9=2000); s/x = 1000\r\n");
+    RC_TRACE("walk: setup()\n");
+    hal.console->printf("\r\nAP-K3 6-channel walking PWM diagnostic\r\n");
 
     hal.rcout->init();
-    hal.rcout->set_freq(1U << 0, 50);       // 50 Hz frame on channel 0
-    hal.rcout->enable_ch(0);                 // waits for tbclk, starts EPWM0
-    hal.rcout->write(0, current_us);         // arm immediately at 1000 us
+    hal.rcout->set_freq((1U << NUM_CH) - 1, 50);   // ch0..ch5 @ 50 Hz
 
-    hal.console->printf("armed at %u us; waiting for command\r\n",
-                        (unsigned)current_us);
-    RC_TRACE("esc: armed %u us\n", (unsigned)current_us);
+    // Set every output safely to 1000 us BEFORE enabling.
+    for (uint8_t ch = 0; ch < NUM_CH; ch++) {
+        hal.rcout->write(ch, IDLE_US);
+    }
+    // Enable each channel (waits for its peripheral clock; skips on timeout).
+    for (uint8_t ch = 0; ch < NUM_CH; ch++) {
+        hal.rcout->enable_ch(ch);
+    }
+    // Hold all at idle.
+    for (uint8_t ch = 0; ch < NUM_CH; ch++) {
+        hal.rcout->write(ch, IDLE_US);
+    }
+    hal.console->printf("all channels armed at %u us\r\n", (unsigned)IDLE_US);
+    RC_TRACE("walk: armed all at %u us\n", (unsigned)IDLE_US);
 }
+
+static uint8_t sel = 0;
 
 void loop(void)
 {
-    // Non-blocking read: -1 when no byte is available, so the main loop never
-    // stalls waiting for input.
-    int16_t ci = hal.console->read();
-    if (ci < 0) {
-        hal.scheduler->delay(2);
-        return;
-    }
+    RC_TRACE("walk: select ch%u -> %u us\n", (unsigned)sel, (unsigned)WALK_US);
+    hal.console->printf("ch%u -> %u us\r\n", (unsigned)sel, (unsigned)WALK_US);
+    hal.rcout->write(sel, WALK_US);
+    hal.scheduler->delay(2000);
 
-    char c = (char)ci;
-    if (c == '\r' || c == '\n' || c == ' ') {
-        return;                              // ignore line endings / spaces
-    }
+    hal.rcout->write(sel, IDLE_US);
+    RC_TRACE("walk: ch%u -> %u us\n", (unsigned)sel, (unsigned)IDLE_US);
+    hal.scheduler->delay(200);
 
-    uint16_t us;
-    if (map_command(c, us)) {
-        apply_us(c, us);                     // latches current_us
-    } else {
-        hal.console->printf("invalid command '%c' -> RCOutput ch0 unchanged at %u us\r\n",
-                            c, (unsigned)current_us);
-        RC_TRACE("esc: invalid cmd, held %u us\n", (unsigned)current_us);
-    }
+    sel = (uint8_t)((sel + 1) % NUM_CH);
 }
 
 AP_HAL_MAIN();
