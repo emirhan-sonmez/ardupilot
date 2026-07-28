@@ -3,120 +3,200 @@
 #if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
 
 #include "RCOutput.h"
-#include <ch.h>              // chThdSleepMilliseconds
-#include <am67_epwm.h>       // register-level EPWM0_A driver (ChibiOS AM67 port)
-#include "hwdef/boot/trace.h" // RemoteProc trace buffer (independent of UART)
+#include <ch.h>                // chThdSleepMilliseconds
+#include <hal.h>               // AM67_* base addresses (board.h)
+#include <am67_epwm.h>         // generic eHRPWM driver (ChibiOS AM67 port)
+#include <am67_ecap.h>         // eCAP APWM driver
+#include "hwdef/boot/trace.h"  // RemoteProc trace buffer (independent of UART)
 
 using namespace ChibiOS_K3;
 
+// Peripheral indices (EPWM1 backs both ch1 and ch2).
+enum { P_EPWM0 = 0, P_EPWM1 = 1, P_ECAP0 = 2, P_ECAP1 = 3, P_ECAP2 = 4 };
+
+struct periph_desc { uint32_t base; bool is_ecap; };
+static const periph_desc PERIPH[5] = {
+    { AM67_EPWM0_BASE, false },
+    { AM67_EPWM1_BASE, false },
+    { AM67_ECAP0_BASE, true  },
+    { AM67_ECAP1_BASE, true  },
+    { AM67_ECAP2_BASE, true  },
+};
+
+struct chan_desc { uint8_t periph; bool output_b; };
+static const chan_desc CHAN[6] = {
+    { P_EPWM0, false },   // ch0 EHRPWM0_A
+    { P_EPWM1, false },   // ch1 EHRPWM1_A
+    { P_EPWM1, true  },   // ch2 EHRPWM1_B
+    { P_ECAP0, false },   // ch3 ECAP0 APWM
+    { P_ECAP1, false },   // ch4 ECAP1 APWM
+    { P_ECAP2, false },   // ch5 ECAP2 APWM
+};
+
 void RCOutput::init()
 {
-    // Nothing to touch until enable_ch(): the EPWM time base is only clocked
-    // once the Linux-owned epwm_tbclk gate is enabled (a Linux pwm channel is
-    // enabled from user space).
-    trace_printf("rcout: init()\n");
+    trace_printf("rcout: init (6 channels)\n");
 }
 
 void RCOutput::set_freq(uint32_t chmask, uint16_t freq_hz)
 {
-    if ((chmask & (1U << CH_EPWM0A)) == 0 || freq_hz == 0) {
+    if (freq_hz == 0) {
         return;
     }
     _freq_hz = freq_hz;
-    if (_started) {
-        epwm0a_start(_freq_hz);              // re-program the time base
-        epwm0a_set_pulse_us(_pulse_us);      // restore the current pulse
+    // Re-program the time base of any already-started peripheral referenced by
+    // the mask.
+    for (uint8_t ch = 0; ch < NUM_CH; ch++) {
+        if ((chmask & (1U << ch)) == 0) {
+            continue;
+        }
+        uint8_t p = CHAN[ch].periph;
+        if (_p_started[p]) {
+            if (PERIPH[p].is_ecap) {
+                ecap_start(PERIPH[p].base, _freq_hz);
+            } else {
+                ehrpwm_start(PERIPH[p].base, _freq_hz);
+            }
+        }
     }
 }
 
 uint16_t RCOutput::get_freq(uint8_t chan)
 {
-    return (chan == CH_EPWM0A) ? _freq_hz : 0;
+    return (chan < NUM_CH) ? _freq_hz : 0;
 }
 
-void RCOutput::wait_for_timebase()
+bool RCOutput::wait_for_timebase(uint8_t p)
 {
-    // TBCTR only advances when the epwm_tbclk gate is running. Poll it, bounded
-    // (~20 s) so a missing Linux channel-enable can't hang bring-up forever.
-    trace_printf("rcout: wait_for_timebase enter\n");
-    for (uint16_t tries = 0; tries < 40; tries++) {
-        uint16_t a = epwm0a_read_tbctr();
+    const periph_desc &d = PERIPH[p];
+    // Bounded (~5 s): counter must advance, else its clock gate never started.
+    for (uint16_t tries = 0; tries < 16; tries++) {
+        uint32_t a = d.is_ecap ? ecap_read_tsctr(d.base) : ehrpwm_read_tbctr(d.base);
         chThdSleepMilliseconds(5);
-        uint16_t b = epwm0a_read_tbctr();
+        uint32_t b = d.is_ecap ? ecap_read_tsctr(d.base) : ehrpwm_read_tbctr(d.base);
         if (a != b) {
-            trace_printf("rcout: timebase running (a=%u b=%u tries=%u)\n",
-                         (uint32_t)a, (uint32_t)b, (uint32_t)tries);
-            return;                          // time base is running
+            trace_printf("rcout: periph %u timebase running\n", (uint32_t)p);
+            return true;
         }
-        if ((tries % 4U) == 0U) {
-            trace_printf("rcout: TBCTR frozen a=%u b=%u tries=%u\n",
-                         (uint32_t)a, (uint32_t)b, (uint32_t)tries);
-        }
-        chThdSleepMilliseconds(500);
+        chThdSleepMilliseconds(300);
     }
-    trace_printf("rcout: wait_for_timebase TIMEOUT (counter never advanced)\n");
+    trace_printf("rcout: periph %u CLOCK TIMEOUT (counter never advanced)\n",
+                 (uint32_t)p);
+    return false;
+}
+
+bool RCOutput::ensure_peripheral(uint8_t p)
+{
+    if (_p_started[p]) {
+        return true;
+    }
+    if (_p_failed[p]) {
+        return false;
+    }
+    if (!wait_for_timebase(p)) {
+        _p_failed[p] = true;
+        return false;
+    }
+    if (PERIPH[p].is_ecap) {
+        ecap_start(PERIPH[p].base, _freq_hz);
+    } else {
+        ehrpwm_start(PERIPH[p].base, _freq_hz);
+    }
+    _p_started[p] = true;
+    trace_printf("rcout: periph %u started (freq=%u)\n",
+                 (uint32_t)p, (uint32_t)_freq_hz);
+    return true;
+}
+
+void RCOutput::hw_set(uint8_t chan, uint16_t us)
+{
+    const chan_desc &c = CHAN[chan];
+    if (PERIPH[c.periph].is_ecap) {
+        ecap_set_pulse_us(PERIPH[c.periph].base, us);
+    } else {
+        ehrpwm_out_set_pulse_us(PERIPH[c.periph].base, c.output_b, us);
+    }
 }
 
 void RCOutput::enable_ch(uint8_t chan)
 {
-    trace_printf("rcout: enable_ch(%u) started=%u\n",
-                 (uint32_t)chan, (uint32_t)_started);
-    if (chan != CH_EPWM0A) {
-        return;                              // only channel 0 is wired
+    if (chan >= NUM_CH) {
+        return;                              // ignore out-of-range safely
     }
-    if (!_started) {
-        wait_for_timebase();
-        epwm0a_start(_freq_hz);              // our prescale/period, 0% duty
-        _started = true;
-        trace_printf("rcout: epwm0a_start(%u) TBPRD=%u TBCTR=%u TBCTL=%x\n",
-                     (uint32_t)_freq_hz, (uint32_t)epwm0a_read_tbprd(),
-                     (uint32_t)epwm0a_read_tbctr(), (uint32_t)epwm0a_read_tbctl());
+    const chan_desc &c = CHAN[chan];
+    if (!ensure_peripheral(c.periph)) {
+        trace_printf("rcout: ch%u NOT enabled (periph %u clock failed)\n",
+                     (uint32_t)chan, (uint32_t)c.periph);
+        return;                              // do not enable if clock failed
     }
-    _enabled = true;
-    epwm0a_set_pulse_us(_pulse_us);          // apply last commanded (0 => low)
-    trace_printf("rcout: enable_ch done pulse=%u CMPA=%u AQCTLA=%x AQCSFRC=%x\n",
-                 (uint32_t)_pulse_us, (uint32_t)epwm0a_read_cmpa(),
-                 (uint32_t)epwm0a_read_aqctla(), (uint32_t)epwm0a_read_aqcsfrc());
+    if (!PERIPH[c.periph].is_ecap) {
+        ehrpwm_out_enable(PERIPH[c.periph].base, c.output_b);
+    }
+    _ch_enabled[chan] = true;
+
+    uint16_t us = _pulse_us[chan];
+    if (us < PWM_MIN_US) { us = PWM_MIN_US; }
+    if (us > PWM_MAX_US) { us = PWM_MAX_US; }
+    _pulse_us[chan] = us;
+    hw_set(chan, us);
+    trace_printf("rcout: ch%u enabled -> %u us\n", (uint32_t)chan, (uint32_t)us);
 }
 
 void RCOutput::disable_ch(uint8_t chan)
 {
-    if (chan != CH_EPWM0A) {
+    if (chan >= NUM_CH) {
         return;
     }
-    _enabled = false;
-    // Rest the output low (0% duty) but keep the counter running, so a later
-    // enable_ch() doesn't stall waiting on a time base we froze ourselves.
-    epwm0a_set_pulse_us(0);
+    _ch_enabled[chan] = false;
+    const chan_desc &c = CHAN[chan];
+    if (PERIPH[c.periph].is_ecap) {
+        ecap_low(PERIPH[c.periph].base);
+    } else {
+        ehrpwm_out_low(PERIPH[c.periph].base, c.output_b);
+    }
 }
 
 void RCOutput::write(uint8_t chan, uint16_t period_us)
 {
-    if (chan != CH_EPWM0A) {
+    if (chan >= NUM_CH) {
         return;
     }
-    _pulse_us = period_us;
-    if (_enabled && _started) {
-        epwm0a_set_pulse_us(period_us);
-        trace_printf("rcout: write(%u,%u) -> CMPA=%u TBPRD=%u\n",
+    if (period_us < PWM_MIN_US) { period_us = PWM_MIN_US; }
+    if (period_us > PWM_MAX_US) { period_us = PWM_MAX_US; }
+    _pulse_us[chan] = period_us;
+
+    if (!_ch_enabled[chan]) {
+        return;
+    }
+    hw_set(chan, period_us);
+
+    const chan_desc &c = CHAN[chan];
+    if (PERIPH[c.periph].is_ecap) {
+        // Shadow = what we just wrote; active = what the hardware runs now (it
+        // catches up to the shadow at the next period boundary).
+        trace_printf("rcout: ch%u=%u us ECAP shadow[cmp=%u prd=%u] active[cmp=%u prd=%u]\n",
                      (uint32_t)chan, (uint32_t)period_us,
-                     (uint32_t)epwm0a_read_cmpa(), (uint32_t)epwm0a_read_tbprd());
+                     (uint32_t)ecap_read_compare_shadow(PERIPH[c.periph].base),
+                     (uint32_t)ecap_read_period_shadow(PERIPH[c.periph].base),
+                     (uint32_t)ecap_read_compare(PERIPH[c.periph].base),
+                     (uint32_t)ecap_read_period(PERIPH[c.periph].base));
     } else {
-        trace_printf("rcout: write(%u,%u) IGNORED enabled=%u started=%u\n",
+        trace_printf("rcout: ch%u=%u us EPWM cmp=%u tbprd=%u\n",
                      (uint32_t)chan, (uint32_t)period_us,
-                     (uint32_t)_enabled, (uint32_t)_started);
+                     (uint32_t)ehrpwm_read_cmp(PERIPH[c.periph].base, c.output_b),
+                     (uint32_t)ehrpwm_read_tbprd(PERIPH[c.periph].base));
     }
 }
 
 uint16_t RCOutput::read(uint8_t chan)
 {
-    return (chan == CH_EPWM0A) ? _pulse_us : 0;
+    return (chan < NUM_CH) ? _pulse_us[chan] : 0;
 }
 
 void RCOutput::read(uint16_t *period_us, uint8_t len)
 {
     for (uint8_t i = 0; i < len; i++) {
-        period_us[i] = (i == CH_EPWM0A) ? _pulse_us : 0;
+        period_us[i] = (i < NUM_CH) ? _pulse_us[i] : 0;
     }
 }
 

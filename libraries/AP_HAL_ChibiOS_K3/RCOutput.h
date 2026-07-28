@@ -4,16 +4,22 @@
 #include "AP_HAL_ChibiOS_K3_Namespace.h"
 
 /*
-  Minimal single-channel RCOutput for the AM67/J722S K3 backend.
+  Temporary six-channel RCOutput for the AM67/J722S K3 backend.
 
-  Mapping (M5, first slice):
-    RCOutput channel 0  ->  AM67 EPWM0_A  ->  Gemstone 40-pin header pin 29.
+  Channel -> peripheral/output -> Gemstone 40-pin header pin:
+    ch0 -> EHRPWM0_A  -> GPIO5  -> pin 29   (scope-verified)
+    ch1 -> EHRPWM1_A  -> GPIO6  -> pin 31
+    ch2 -> EHRPWM1_B  -> GPIO13 -> pin 33
+    ch3 -> ECAP0 APWM -> GPIO12 -> pin 32
+    ch4 -> ECAP1 APWM -> GPIO16 -> pin 36
+    ch5 -> ECAP2 APWM -> GPIO18 -> pin 12
 
-  Channel 0 is a thin wrapper over the register-level am67_epwm driver in the
-  ChibiOS AM67 port (the same driver scope-verified at 50 Hz / 1.0-2.0 ms).
-  Channels 1..n have no hardware yet and are ignored. The EPWM time base is
-  clocked by the Linux-owned epwm_tbclk gate, so enable_ch() waits until the
-  counter is actually running before programming EPWM0.
+  EHRPWM0_B (pin 8) is intentionally NOT used -- it is the UART1 console TX.
+
+  Five peripherals back the six channels (EPWM1 drives ch1+ch2). Each
+  peripheral's time base is clocked by a Linux-owned gate, so enable_ch() waits
+  for that peripheral's counter to actually advance before programming it, and
+  refuses to enable a channel whose peripheral clock never started.
 */
 class ChibiOS_K3::RCOutput : public AP_HAL::RCOutput {
 public:
@@ -29,13 +35,18 @@ public:
     void     push() override {}
 
 private:
-    static const uint8_t CH_EPWM0A = 0;   // channel 0 -> EPWM0_A -> pin 29
+    static const uint8_t  NUM_CH = 6;
+    static const uint8_t  NUM_PERIPH = 5;      // EPWM0, EPWM1, ECAP0, ECAP1, ECAP2
+    static const uint16_t PWM_MIN_US = 1000;   // test clamp
+    static const uint16_t PWM_MAX_US = 2000;
 
-    // Block (bounded) until the Linux-owned tbclk gate is running (TBCTR moves).
-    void wait_for_timebase();
+    bool ensure_peripheral(uint8_t p);         // wait for clock, start once
+    bool wait_for_timebase(uint8_t p);         // TBCTR/TSCTR advancing?
+    void hw_set(uint8_t chan, uint16_t us);    // drive the right compare reg
 
-    uint16_t _freq_hz = 50;               // default servo/ESC frame
-    uint16_t _pulse_us = 0;               // last commanded high-time (0 = low)
-    bool     _started = false;            // EPWM0 time base programmed by us
-    bool     _enabled = false;            // channel 0 enabled
+    uint16_t _freq_hz = 50;
+    uint16_t _pulse_us[NUM_CH]   = {0};
+    bool     _ch_enabled[NUM_CH] = {false};
+    bool     _p_started[NUM_PERIPH] = {false};
+    bool     _p_failed[NUM_PERIPH]  = {false};
 };
