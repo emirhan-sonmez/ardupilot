@@ -16,8 +16,8 @@
   (examples/imu/icm20948.c), keeping its register order and its default
   ranges so a trace line here can be compared directly against that
   program's output on the same board. Only the bus layer differs: spidev
-  ioctls become ChibiOS spiSelect/spiExchange/spiUnselect, and usleep()
-  becomes chThdSleepMilliseconds().
+  ioctls become polled ChibiOS transfers (see the note on spiPolledExchange
+  below), and usleep() becomes chThdSleepMilliseconds().
 
   Deliberately NOT an AP_HAL SPIDevice and NOT an AP_InertialSensor
   backend. hal.spi is still Empty::SPIDeviceManager, so AP_InertialSensor
@@ -36,9 +36,10 @@
   Without that, both masters drive the bus and reads return garbage rather
   than an error. Re-bind (same path, `bind`) to hand it back.
 
-  The ICM-20948's enable line (MCU_GPIO0_12, active low) is driven by
-  spi0_imu_enable() in the ChibiOS SPI driver, not here -- see
-  os/hal/ports/TI/AM67/hal_spi_lld.c.
+  The ICM-20948's enable line (MCU_GPIO0_12, active low) is asserted from
+  here via am67_spi0_imu_enable(), defined in the ChibiOS SPI driver
+  (os/hal/ports/TI/AM67/hal_spi_lld.c) but deliberately not called from
+  spiStart(): it touches MCU_GPIO0, a peripheral neither layer owns.
 */
 
 extern const AP_HAL::HAL& hal;
@@ -100,6 +101,13 @@ const SPIConfig spicfg = {
 
 constexpr uint32_t RETRY_INTERVAL_MS = 2000;
 
+// Inter-transaction settling. Bring-up runs a few dozen transactions once,
+// so even the generous bank-switch value is invisible; the sample path in
+// bench_imu_update() is a single burst read and pays SETTLE_US once.
+constexpr uint16_t SETTLE_US      = 20;
+constexpr uint16_t BANK_SETTLE_US = 200;
+constexpr uint8_t  WRITE_RETRIES  = 3;
+
 bool imu_present;
 bool spi_started;
 uint8_t attempts;
@@ -149,6 +157,9 @@ void spi_write(uint8_t reg, uint8_t value)
     spi_xfer_byte(reg);
     spi_xfer_byte(value);
     spiUnselect(&SPID1);
+    // Settling time between transactions. The part needs the chip select
+    // high for a minimum period, and this costs nothing at bring-up rates.
+    hal.scheduler->delay_microseconds(SETTLE_US);
 }
 
 void set_bank(uint8_t bank)
@@ -158,13 +169,43 @@ void set_bank(uint8_t bank)
     }
     spi_write(REG_BANK_SEL, (uint8_t)((bank << 4) & 0x30));
     current_bank = (int8_t)bank;
+    // A bank switch is not an ordinary write: everything after it is
+    // addressed through the new bank, and the first transaction following
+    // it was observed on hardware not to take (GYRO_CONFIG_1, the first
+    // write after switching to bank 2, read back as 0 every time while a
+    // later write in the same bank stuck).
+    hal.scheduler->delay_microseconds(BANK_SETTLE_US);
 }
 
 uint8_t read_reg(uint8_t reg)
 {
     uint8_t value = 0;
     spi_read(reg, &value, 1);
+    hal.scheduler->delay_microseconds(SETTLE_US);
     return value;
+}
+
+// Write, read back, retry. Returns the value finally read, and traces every
+// attempt that did not take -- a configuration write that silently fails
+// surfaces much later as data of plausible shape and the wrong scale, which
+// is far more expensive to debug than a loud failure here.
+bool write_verified(uint8_t reg, uint8_t value, bool verbose)
+{
+    for (uint8_t i = 0; i < WRITE_RETRIES; i++) {
+        spi_write(reg, value);
+        const uint8_t rb = read_reg(reg);
+        if (rb == value) {
+            if (verbose && i > 0) {
+                trace_printf("AP-K3: imu: reg %x took %u attempt(s)\n", reg, i + 1);
+            }
+            return true;
+        }
+        if (verbose) {
+            trace_printf("AP-K3: imu: reg %x wrote %x read %x (attempt %u)\n",
+                         reg, value, rb, i + 1);
+        }
+    }
+    return false;
 }
 
 /*
@@ -186,7 +227,7 @@ bool imu_try_bringup()
     // this module died silently somewhere in here, and "which register
     // access was the last one to complete" is the only thing that
     // distinguishes a gated clock from a bus fault from a hung transfer.
-    const bool verbose = (attempts == 1);
+    const bool verbose = (attempts <= 3);
 
     // MCU_GPIO0 is a different peripheral, whose clock/power state nothing
     // here manages -- if it is gated, this access is the one that faults.
@@ -297,27 +338,22 @@ bool imu_try_bringup()
 
     const uint8_t gyro_cfg  = (uint8_t)((CFG_DLPF << 3) | (CFG_GYRO_FS << 1) | 0x01);
     const uint8_t accel_cfg = (uint8_t)((CFG_DLPF << 3) | (CFG_ACCEL_FS << 1) | 0x01);
-    spi_write(REG_GYRO_CONFIG_1, gyro_cfg);
-    spi_write(REG_ACCEL_CONFIG, accel_cfg);
 
-    spi_write(REG_GYRO_SMPLRT_DIV, CFG_SMPLRT_DIV);
+    bool ok = true;
+    ok &= write_verified(REG_GYRO_CONFIG_1, gyro_cfg, verbose);
+    ok &= write_verified(REG_ACCEL_CONFIG, accel_cfg, verbose);
+    ok &= write_verified(REG_GYRO_SMPLRT_DIV, CFG_SMPLRT_DIV, verbose);
     // The accelerometer divider is 12 bits across two registers.
-    spi_write(REG_ACCEL_SMPLRT_DIV_1, 0);
-    spi_write(REG_ACCEL_SMPLRT_DIV_2, CFG_SMPLRT_DIV);
+    ok &= write_verified(REG_ACCEL_SMPLRT_DIV_1, 0, verbose);
+    ok &= write_verified(REG_ACCEL_SMPLRT_DIV_2, CFG_SMPLRT_DIV, verbose);
     // Start both sample clocks together so the samples stay in step.
-    spi_write(REG_ODR_ALIGN_EN, 0x01);
-
-    // Read the two config registers back. A write that does not stick is
-    // the failure mode that otherwise shows up much later as data with
-    // plausible shape and wrong scale.
-    const uint8_t gyro_rb  = read_reg(REG_GYRO_CONFIG_1);
-    const uint8_t accel_rb = read_reg(REG_ACCEL_CONFIG);
+    ok &= write_verified(REG_ODR_ALIGN_EN, 0x01, verbose);
 
     set_bank(0);
 
-    if (gyro_rb != gyro_cfg || accel_rb != accel_cfg) {
-        trace_printf("AP-K3: imu: config readback mismatch gyro=%x/%x accel=%x/%x, retrying\n",
-                     gyro_rb, gyro_cfg, accel_rb, accel_cfg);
+    if (!ok) {
+        trace_printf("AP-K3: imu: configuration did not stick after %u attempts each, retrying\n",
+                     WRITE_RETRIES);
         return false;
     }
     if (xfer_failed) {
