@@ -49,7 +49,9 @@ namespace {
 // Bank 0
 constexpr uint8_t REG_WHO_AM_I     = 0x00;
 constexpr uint8_t REG_USER_CTRL    = 0x03;
+constexpr uint8_t REG_LP_CONFIG    = 0x05;
 constexpr uint8_t REG_PWR_MGMT_1   = 0x06;
+constexpr uint8_t REG_PWR_MGMT_2   = 0x07;
 constexpr uint8_t REG_ACCEL_OUT    = 0x2D;   // accel, gyro and temp, contiguous
 // Bank 2
 constexpr uint8_t REG_GYRO_SMPLRT_DIV     = 0x00;
@@ -82,43 +84,29 @@ constexpr float GYRO_SENSITIVITY   = 131.0f;    // LSB/(deg/s) at +/-250dps
 constexpr uint8_t  SPI_CS_CHANNEL  = 3;      // CS3 = ICM-20948 (CS1 = baro)
 
 /*
-  Candidate bus configurations, tried in turn on successive bring-up
-  attempts until one produces a clean bus check and a configuration that
-  reads back.
+  Bus rate: 1 MHz, settled by measurement rather than by the datasheet.
 
-  This exists because the first working run was not clean: WHO_AM_I
-  answered 0xEA reliably enough to prove the wiring, but individual
-  register writes read back as 0xff / 0x18 / 0x00 for the same register on
-  successive attempts, and WHO_AM_I itself intermittently returned 0x0f and
-  0x00. Random values rather than consistently wrong ones means marginal
-  signalling, not a protocol mistake.
+  bus_check() (below) reads WHO_AM_I 32 times and counts correct answers.
+  On hardware:
 
-  Two suspects, hence two variables:
+      1 MHz    32/32     clean
+      4 MHz     0/32     every single read wrong
 
-  - Clock. The Linux hwdef uses 4 MHz low-speed, but the NuttX AM67 port
-    (boards/arm/am67/t3-gem-o1) drives these same parts on this same
-    controller at 1 MHz. Linux also has a kernel driver doing the transfer
-    with DMA and hardware CS timing; we are bit-banging registers with a
-    polled loop, which is not the same electrical duty cycle.
-  - The IMU enable line. Driving MCU_GPIO0_12 low is what NuttX's table
-    says activates the part, but that has never been verified here, and a
-    part held in a marginal enable state would behave exactly like this.
+  4 MHz is what the Linux hwdef lists as this part's low-speed rate, and it
+  is what this module used for its first three hardware runs -- which is
+  why those runs saw the same register read back as 0xff, 0x18 and 0x00,
+  and why WHO_AM_I itself intermittently returned garbage. Linux reaches
+  4 MHz with a kernel driver doing DMA and hardware-timed chip select; this
+  is a polled register loop, which is not the same electrical duty cycle.
+  1 MHz is also what the NuttX AM67 port uses for these parts on this
+  controller, so it is not an arbitrary retreat.
 
-  Cycling them costs one boot instead of four, and the trace says which
-  combination works rather than leaving it to inference.
+  Driving the IMU enable line made no measurable difference: 32/32 either
+  way, and identical write behaviour. It is still asserted, because NuttX's
+  board table says it is what activates the part and there is no cost to
+  being right about it, but it is not load-bearing for the bus working.
 */
-struct bus_option {
-    uint32_t speed;
-    bool     drive_imu_en;
-};
-
-const bus_option bus_options[] = {
-    { 1000000, true  },   // NuttX's proven rate for this part
-    { 1000000, false },   // ...and without touching the enable line
-    { 4000000, true  },   // the Linux hwdef low-speed rate
-    {  400000, true  },   // slower still, if 1 MHz is not enough
-};
-constexpr uint8_t NUM_BUS_OPTIONS = sizeof(bus_options) / sizeof(bus_options[0]);
+constexpr uint32_t SPI_SPEED_HZ = 1000000;
 
 constexpr uint32_t SAMPLE_INTERVAL_MS = 20;   // 50 Hz read
 constexpr uint32_t REPORT_INTERVAL_MS = 1000; // 1 Hz trace line
@@ -129,7 +117,7 @@ constexpr uint32_t REPORT_INTERVAL_MS = 1000; // 1 Hz trace line
 
 SPIConfig spicfg = {
     .end_cb     = nullptr,
-    .speed      = 1000000,
+    .speed      = SPI_SPEED_HZ,
     .mode       = 3,                 // CPOL=1 CPHA=1, per the Linux hwdef.
                                      // NuttX maps CPOL/CPHA to the McSPI
                                      // POL/PHA bits the same way, so this
@@ -142,8 +130,8 @@ constexpr uint32_t RETRY_INTERVAL_MS = 2000;
 // Inter-transaction settling. Bring-up runs a few dozen transactions once,
 // so even the generous bank-switch value is invisible; the sample path in
 // bench_imu_update() is a single burst read and pays SETTLE_US once.
-constexpr uint16_t SETTLE_US      = 20;
-constexpr uint16_t BANK_SETTLE_US = 200;
+constexpr uint16_t SETTLE_US      = 200;
+constexpr uint16_t BANK_SETTLE_US = 1000;
 constexpr uint8_t  WRITE_RETRIES  = 3;
 constexpr uint8_t  BUS_CHECK_SAMPLES = 32;
 
@@ -246,6 +234,39 @@ uint8_t bus_check(uint8_t samples)
     return good;
 }
 
+/*
+  Dumps the registers that determine whether a configuration write can take
+  effect at all, plus the bank-select register itself.
+
+  BANK_SEL is the important one. Every register address below 0x7F means a
+  different thing per bank, so if that write is not holding, every
+  conclusion drawn from a readback is wrong -- and it is the one register
+  whose correctness was assumed rather than checked.
+*/
+void dump_state()
+{
+    set_bank(0);
+    const uint8_t bank_rb   = read_reg(REG_BANK_SEL);
+    const uint8_t user_ctrl = read_reg(REG_USER_CTRL);
+    const uint8_t lp_config = read_reg(REG_LP_CONFIG);
+    const uint8_t pwr1      = read_reg(REG_PWR_MGMT_1);
+    const uint8_t pwr2      = read_reg(REG_PWR_MGMT_2);
+
+    trace_printf("AP-K3: imu: bank0 sel=%x user_ctrl=%x lp_cfg=%x pwr1=%x pwr2=%x\n",
+                 bank_rb, user_ctrl, lp_config, pwr1, pwr2);
+
+    set_bank(2);
+    const uint8_t bank2_sel = read_reg(REG_BANK_SEL);
+    const uint8_t smplrt    = read_reg(REG_GYRO_SMPLRT_DIV);
+    const uint8_t gyro_cfg  = read_reg(REG_GYRO_CONFIG_1);
+    const uint8_t odr_align = read_reg(REG_ODR_ALIGN_EN);
+    const uint8_t accel_d2  = read_reg(REG_ACCEL_SMPLRT_DIV_2);
+    const uint8_t accel_cfg = read_reg(REG_ACCEL_CONFIG);
+
+    trace_printf("AP-K3: imu: bank2 sel=%x smplrt=%x gyrocfg=%x odralign=%x acceld2=%x accelcfg=%x\n",
+                 bank2_sel, smplrt, gyro_cfg, odr_align, accel_d2, accel_cfg);
+}
+
 // Write, read back, retry. Returns the value finally read, and traces every
 // attempt that did not take -- a configuration write that silently fails
 // surfaces much later as data of plausible shape and the wrong scale, which
@@ -287,22 +308,13 @@ bool imu_try_bringup()
     // Step-by-step trace while the bus itself is still in question. "Which
     // register access was the last one to complete" is the only thing that
     // distinguishes a gated clock from a bus fault from a hung transfer.
-    const bool verbose = (attempts <= 2 * NUM_BUS_OPTIONS);
-
-    // Walk the candidate configurations rather than committing to one.
-    const bus_option &opt = bus_options[(attempts - 1) % NUM_BUS_OPTIONS];
-    spicfg.speed = opt.speed;
+    const bool verbose = (attempts <= 4);
 
     if (verbose) {
-        trace_printf("AP-K3: imu: attempt %u: %u Hz, imu_en %s\n",
-                     attempts, opt.speed, opt.drive_imu_en ? "driven" : "untouched");
+        trace_printf("AP-K3: imu: attempt %u at %u Hz\n", attempts, SPI_SPEED_HZ);
     }
 
-    // MCU_GPIO0 is a different peripheral, whose clock/power state nothing
-    // here manages -- if it is gated, this access is the one that faults.
-    if (opt.drive_imu_en) {
-        am67_spi0_imu_enable();
-    }
+    am67_spi0_imu_enable();
     spiStart(&SPID1, &spicfg);
     spi_started = true;
     if (!SPID1.ready) {
@@ -352,15 +364,15 @@ bool imu_try_bringup()
     const uint8_t good = bus_check(BUS_CHECK_SAMPLES);
     if (verbose) {
         trace_printf("AP-K3: imu: bus check %u/%u at %u Hz\n",
-                     good, BUS_CHECK_SAMPLES, opt.speed);
+                     good, BUS_CHECK_SAMPLES, SPI_SPEED_HZ);
     }
     if (good < BUS_CHECK_SAMPLES) {
         // Anything short of perfect is a marginal bus. Configuration writes
         // over it would sometimes stick and sometimes not, which is exactly
         // the failure this module already spent two hardware runs on.
         if (verbose) {
-            trace_printf("AP-K3: imu: bus not clean at %u Hz, trying next configuration\n",
-                         opt.speed);
+            trace_printf("AP-K3: imu: bus not clean at %u Hz, retrying\n",
+                         SPI_SPEED_HZ);
         }
         return false;
     }
@@ -404,9 +416,23 @@ bool imu_try_bringup()
     // choice. Pin it to SPI: until the I2C slave interface is disabled, bus
     // noise can re-select it.
     spi_write(REG_USER_CTRL, BIT_I2C_IF_DIS);
-    trace_printf("AP-K3: imu: WHO_AM_I=%x OK on CS%u, bus clean, %u Hz, imu_en %s\n",
-                 who, SPI_CS_CHANNEL, opt.speed,
-                 opt.drive_imu_en ? "driven" : "untouched");
+
+    // Power the sensors on explicitly. PWR_MGMT_2 disable bits are [5:3]
+    // for the accelerometer axes and [2:0] for the gyro axes, and 0x3F --
+    // everything off -- is a documented reset value for this part. The
+    // Linux example never writes this register and works, but it runs
+    // against a device Linux has already brought up; nothing here has.
+    //
+    // This is the leading explanation for what the previous run showed:
+    // GYRO_SMPLRT_DIV, ACCEL_SMPLRT_DIV_2 and ODR_ALIGN_EN read back 0 no
+    // matter how often they were written, while GYRO_CONFIG_1 and
+    // ACCEL_CONFIG in the same bank did take. Sample-rate registers
+    // belonging to a powered-down sensor not latching, while pure
+    // configuration registers do, fits exactly.
+    spi_write(REG_PWR_MGMT_2, 0x00);
+    chThdSleepMilliseconds(20);
+    trace_printf("AP-K3: imu: WHO_AM_I=%x OK on CS%u, bus clean at %u Hz\n",
+                 who, SPI_CS_CHANNEL, SPI_SPEED_HZ);
 
     // GYRO_CONFIG_1 / ACCEL_CONFIG both pack DLPFCFG at bits 5:3, FS_SEL at
     // bits 2:1 and FCHOICE (filter in circuit) at bit 0. The Linux example
@@ -414,6 +440,10 @@ bool imu_try_bringup()
     // writes for the same reason as above -- every reserved bit in both
     // registers resets to 0, so there is nothing worth preserving, and a
     // bad read cannot corrupt the result.
+    if (verbose) {
+        dump_state();
+    }
+
     set_bank(2);
 
     const uint8_t gyro_cfg  = (uint8_t)((CFG_DLPF << 3) | (CFG_GYRO_FS << 1) | 0x01);
@@ -434,6 +464,9 @@ bool imu_try_bringup()
     if (!ok) {
         trace_printf("AP-K3: imu: configuration did not stick after %u attempts each, retrying\n",
                      WRITE_RETRIES);
+        if (verbose) {
+            dump_state();
+        }
         return false;
     }
     if (xfer_failed) {
