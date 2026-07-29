@@ -23,9 +23,14 @@ public:
     bool is_system_initialized() override;
     void reboot(bool hold_in_bootloader = false) override;
     bool in_main_thread() const override;
+    bool thread_create(AP_HAL::MemberProc proc, const char *name,
+                        uint32_t stack_size, priority_base base,
+                        int8_t priority) override;
 
 private:
     bool _initialized;
     // ChibiOS main thread handle (opaque thread_t*), set in init().
     void *_main_thread;
+
+    static void _thread_trampoline(void *ctx);
 };
