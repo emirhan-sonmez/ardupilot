@@ -79,11 +79,46 @@ constexpr uint8_t CFG_SMPLRT_DIV   = 10;
 constexpr float ACCEL_SENSITIVITY  = 16384.0f;  // LSB/g at +/-2g
 constexpr float GYRO_SENSITIVITY   = 131.0f;    // LSB/(deg/s) at +/-250dps
 
-// The ICM-20948 tolerates 7 MHz for register reads; the Linux hwdef for this
-// board uses 4 MHz low-speed / 8 MHz high-speed. Stay at the low-speed value
-// while the bus itself is still being proven.
-constexpr uint32_t SPI_SPEED_HZ    = 4000000;
 constexpr uint8_t  SPI_CS_CHANNEL  = 3;      // CS3 = ICM-20948 (CS1 = baro)
+
+/*
+  Candidate bus configurations, tried in turn on successive bring-up
+  attempts until one produces a clean bus check and a configuration that
+  reads back.
+
+  This exists because the first working run was not clean: WHO_AM_I
+  answered 0xEA reliably enough to prove the wiring, but individual
+  register writes read back as 0xff / 0x18 / 0x00 for the same register on
+  successive attempts, and WHO_AM_I itself intermittently returned 0x0f and
+  0x00. Random values rather than consistently wrong ones means marginal
+  signalling, not a protocol mistake.
+
+  Two suspects, hence two variables:
+
+  - Clock. The Linux hwdef uses 4 MHz low-speed, but the NuttX AM67 port
+    (boards/arm/am67/t3-gem-o1) drives these same parts on this same
+    controller at 1 MHz. Linux also has a kernel driver doing the transfer
+    with DMA and hardware CS timing; we are bit-banging registers with a
+    polled loop, which is not the same electrical duty cycle.
+  - The IMU enable line. Driving MCU_GPIO0_12 low is what NuttX's table
+    says activates the part, but that has never been verified here, and a
+    part held in a marginal enable state would behave exactly like this.
+
+  Cycling them costs one boot instead of four, and the trace says which
+  combination works rather than leaving it to inference.
+*/
+struct bus_option {
+    uint32_t speed;
+    bool     drive_imu_en;
+};
+
+const bus_option bus_options[] = {
+    { 1000000, true  },   // NuttX's proven rate for this part
+    { 1000000, false },   // ...and without touching the enable line
+    { 4000000, true  },   // the Linux hwdef low-speed rate
+    {  400000, true  },   // slower still, if 1 MHz is not enough
+};
+constexpr uint8_t NUM_BUS_OPTIONS = sizeof(bus_options) / sizeof(bus_options[0]);
 
 constexpr uint32_t SAMPLE_INTERVAL_MS = 20;   // 50 Hz read
 constexpr uint32_t REPORT_INTERVAL_MS = 1000; // 1 Hz trace line
@@ -92,10 +127,13 @@ constexpr uint32_t REPORT_INTERVAL_MS = 1000; // 1 Hz trace line
 // about three minutes of visibility. Raise REPORT_INTERVAL_MS if a longer
 // run matters more than resolution.
 
-const SPIConfig spicfg = {
+SPIConfig spicfg = {
     .end_cb     = nullptr,
-    .speed      = SPI_SPEED_HZ,
-    .mode       = 3,                 // CPOL=1 CPHA=1, per the Linux hwdef
+    .speed      = 1000000,
+    .mode       = 3,                 // CPOL=1 CPHA=1, per the Linux hwdef.
+                                     // NuttX maps CPOL/CPHA to the McSPI
+                                     // POL/PHA bits the same way, so this
+                                     // encoding is not in question.
     .cs_channel = SPI_CS_CHANNEL,
 };
 
@@ -107,6 +145,7 @@ constexpr uint32_t RETRY_INTERVAL_MS = 2000;
 constexpr uint16_t SETTLE_US      = 20;
 constexpr uint16_t BANK_SETTLE_US = 200;
 constexpr uint8_t  WRITE_RETRIES  = 3;
+constexpr uint8_t  BUS_CHECK_SAMPLES = 32;
 
 bool imu_present;
 bool spi_started;
@@ -185,6 +224,28 @@ uint8_t read_reg(uint8_t reg)
     return value;
 }
 
+/*
+  Reads WHO_AM_I repeatedly and counts how many come back correct.
+
+  A single successful WHO_AM_I proves the wiring but says nothing about
+  whether the bus is reliable, and "mostly works" is the failure mode that
+  wastes the most time: it looks like a driver bug in whatever code happens
+  to run next. One number here separates "bus is marginal" from "the
+  register sequence is wrong" immediately.
+*/
+uint8_t bus_check(uint8_t samples)
+{
+    uint8_t good = 0;
+
+    set_bank(0);
+    for (uint8_t i = 0; i < samples; i++) {
+        if (read_reg(REG_WHO_AM_I) == WHO_AM_I_VAL) {
+            good++;
+        }
+    }
+    return good;
+}
+
 // Write, read back, retry. Returns the value finally read, and traces every
 // attempt that did not take -- a configuration write that silently fails
 // surfaces much later as data of plausible shape and the wrong scale, which
@@ -223,21 +284,24 @@ bool imu_try_bringup()
 
     attempts++;
 
-    // Step-by-step trace on the first attempt only. The first version of
-    // this module died silently somewhere in here, and "which register
-    // access was the last one to complete" is the only thing that
+    // Step-by-step trace while the bus itself is still in question. "Which
+    // register access was the last one to complete" is the only thing that
     // distinguishes a gated clock from a bus fault from a hung transfer.
-    const bool verbose = (attempts <= 3);
+    const bool verbose = (attempts <= 2 * NUM_BUS_OPTIONS);
+
+    // Walk the candidate configurations rather than committing to one.
+    const bus_option &opt = bus_options[(attempts - 1) % NUM_BUS_OPTIONS];
+    spicfg.speed = opt.speed;
+
+    if (verbose) {
+        trace_printf("AP-K3: imu: attempt %u: %u Hz, imu_en %s\n",
+                     attempts, opt.speed, opt.drive_imu_en ? "driven" : "untouched");
+    }
 
     // MCU_GPIO0 is a different peripheral, whose clock/power state nothing
     // here manages -- if it is gated, this access is the one that faults.
-    // Traced on both sides so a silent stop points at the exact write.
-    if (verbose) {
-        trace_printf("AP-K3: imu: asserting IMU enable (MCU_GPIO0_12)...\n");
-    }
-    am67_spi0_imu_enable();
-    if (verbose) {
-        trace_printf("AP-K3: imu: IMU enable done, spiStart...\n");
+    if (opt.drive_imu_en) {
+        am67_spi0_imu_enable();
     }
     spiStart(&SPID1, &spicfg);
     spi_started = true;
@@ -282,8 +346,23 @@ bool imu_try_bringup()
         }
         return false;
     }
+
+    // The part is there. Now find out whether the bus is actually reliable
+    // before trusting anything written over it.
+    const uint8_t good = bus_check(BUS_CHECK_SAMPLES);
     if (verbose) {
-        trace_printf("AP-K3: imu: WHO_AM_I=%x on first probe, resetting...\n", who);
+        trace_printf("AP-K3: imu: bus check %u/%u at %u Hz\n",
+                     good, BUS_CHECK_SAMPLES, opt.speed);
+    }
+    if (good < BUS_CHECK_SAMPLES) {
+        // Anything short of perfect is a marginal bus. Configuration writes
+        // over it would sometimes stick and sometimes not, which is exactly
+        // the failure this module already spent two hardware runs on.
+        if (verbose) {
+            trace_printf("AP-K3: imu: bus not clean at %u Hz, trying next configuration\n",
+                         opt.speed);
+        }
+        return false;
     }
 
     // Reset, then wait for the part to come back. Nothing read during the
@@ -325,8 +404,9 @@ bool imu_try_bringup()
     // choice. Pin it to SPI: until the I2C slave interface is disabled, bus
     // noise can re-select it.
     spi_write(REG_USER_CTRL, BIT_I2C_IF_DIS);
-    trace_printf("AP-K3: imu: WHO_AM_I=%x OK on CS%u after %u attempt(s)\n",
-                 who, SPI_CS_CHANNEL, attempts);
+    trace_printf("AP-K3: imu: WHO_AM_I=%x OK on CS%u, bus clean, %u Hz, imu_en %s\n",
+                 who, SPI_CS_CHANNEL, opt.speed,
+                 opt.drive_imu_en ? "driven" : "untouched");
 
     // GYRO_CONFIG_1 / ACCEL_CONFIG both pack DLPFCFG at bits 5:3, FS_SEL at
     // bits 2:1 and FCHOICE (filter in circuit) at bit 0. The Linux example
