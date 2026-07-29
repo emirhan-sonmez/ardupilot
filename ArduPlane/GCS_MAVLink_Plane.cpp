@@ -5,6 +5,10 @@
 #include <AP_Airspeed/AP_Airspeed_config.h>
 #include <AP_EFI/AP_EFI_config.h>
 
+#if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
+#include <AP_HAL_ChibiOS_K3/hwdef/boot/trace.h>  // RemoteProc trace0
+#endif
+
 MAV_TYPE GCS_Plane::frame_type() const
 {
 #if HAL_QUADPLANE_ENABLED
@@ -989,6 +993,18 @@ void GCS_MAVLINK_Plane::handle_manual_control_axes(const mavlink_manual_control_
 void GCS_MAVLINK_Plane::handle_message(const mavlink_message_t &msg)
 {
     switch (msg.msgid) {
+
+#if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
+    case MAVLINK_MSG_ID_PARAM_REQUEST_LIST: {
+        static bool traced;
+        if (!traced) {
+            traced = true;
+            trace_printf("AP-K3: PARAM_REQUEST_LIST received\n");
+        }
+        GCS_MAVLINK::handle_message(msg);
+        break;
+    }
+#endif
 
     case MAVLINK_MSG_ID_SET_ATTITUDE_TARGET:
         handle_set_attitude_target(msg);

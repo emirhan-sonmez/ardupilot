@@ -32,6 +32,10 @@ This provides some support code and variables for MAVLink enabled sketches
 
 extern const AP_HAL::HAL& hal;
 
+#if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
+#include <AP_HAL_ChibiOS_K3/hwdef/boot/trace.h>
+#endif
+
 #ifdef MAVLINK_SEPARATE_HELPERS
 // Shut up warnings about missing declarations; TODO: should be fixed on
 // mavlink/pymavlink project for when MAVLINK_SEPARATE_HELPERS is defined
@@ -132,6 +136,20 @@ uint16_t comm_get_txspace(mavlink_channel_t chan)
  */
 void comm_send_buffer(mavlink_channel_t chan, const uint8_t *buf, uint8_t len)
 {
+#if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
+    static uint8_t trace_count;
+    const bool do_trace = (chan == MAVLINK_COMM_0) && (trace_count < 8);
+    if (do_trace) {
+        trace_count++;
+        trace_printf("AP-K3: comm_send_buffer #%u len=%u valid_chan=%u "
+                     "port=%u discard=%u\n",
+                     (uint32_t)trace_count, (uint32_t)len,
+                     (uint32_t)valid_channel(chan),
+                     (uint32_t)(mavlink_comm_port[chan] != nullptr),
+                     (uint32_t)chan_discard[chan]);
+    }
+#endif
+
     if (!valid_channel(chan) || mavlink_comm_port[chan] == nullptr || chan_discard[chan]) {
         return;
     }
@@ -147,6 +165,12 @@ void comm_send_buffer(mavlink_channel_t chan, const uint8_t *buf, uint8_t len)
         return;
     }
     const size_t written = mavlink_comm_port[chan]->write(buf, len);
+#if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
+    if (do_trace) {
+        trace_printf("AP-K3: comm_send_buffer #%u wrote=%u/%u\n",
+                     (uint32_t)trace_count, (uint32_t)written, (uint32_t)len);
+    }
+#endif
 #if CONFIG_HAL_BOARD == HAL_BOARD_SITL
     if (written < len && !mavlink_comm_port[chan]->is_write_locked()) {
         AP_HAL::panic("Short write on UART: %lu < %u", (unsigned long)written, len);
@@ -166,7 +190,16 @@ void comm_send_lock(mavlink_channel_t chan_m, uint16_t size)
 {
     const uint8_t chan = uint8_t(chan_m);
     chan_locks[chan].take_blocking();
-    if (mavlink_comm_port[chan]->txspace() < size) {
+    const uint16_t space = mavlink_comm_port[chan]->txspace();
+#if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
+    static uint8_t trace_count;
+    if (chan == MAVLINK_COMM_0 && trace_count < 8) {
+        trace_count++;
+        trace_printf("AP-K3: comm_send_lock #%u need=%u txspace=%u\n",
+                     (uint32_t)trace_count, (uint32_t)size, (uint32_t)space);
+    }
+#endif
+    if (space < size) {
         chan_discard[chan] = true;
         gcs_out_of_space_to_send(chan_m);
     }

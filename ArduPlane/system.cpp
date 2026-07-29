@@ -2,6 +2,21 @@
 
 #include "qautotune.h"
 
+#if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
+#include <AP_HAL_ChibiOS_K3/hwdef/boot/trace.h>
+#define K3_SETUP_TRACE(msg) trace_printf("AP-K3: setup phase: " msg "\n")
+#else
+#define K3_SETUP_TRACE(msg) do {} while (0)
+#endif
+
+// GemstoneO1R5F bench bring-up only, set via this board's DEFINES in
+// Tools/ardupilotwaf/boards.py -- see the matching define in
+// AP_InertialSensor.cpp for the full rationale. Defaults to 0 (normal
+// behavior) for every other board.
+#ifndef HAL_GEMSTONE_ALLOW_INIT_NO_INS
+#define HAL_GEMSTONE_ALLOW_INIT_NO_INS 0
+#endif
+
 static void failsafe_check_static()
 {
     plane.failsafe_check();
@@ -22,20 +37,26 @@ void Plane::init_ardupilot()
 #else
     rc().convert_options(RC_Channel::AUX_FUNC::ARMDISARM_UNUSED, RC_Channel::AUX_FUNC::ARMDISARM);
 #endif
+    K3_SETUP_TRACE("rc().init enter");
     rc().init();
+    K3_SETUP_TRACE("rc().init return");
 
 #if AP_RELAY_ENABLED
     relay.init();
 #endif
 
     // initialise notify system
+    K3_SETUP_TRACE("notify.init enter");
     notify.init();
+    K3_SETUP_TRACE("notify.init return");
     notify_mode(*control_mode);
 
     init_rc_out_main();
 
     // init baro
+    K3_SETUP_TRACE("barometer.init enter");
     barometer.init();
+    K3_SETUP_TRACE("barometer.init return");
 
 #if AP_RANGEFINDER_ENABLED
     // initialise rangefinder
@@ -44,7 +65,9 @@ void Plane::init_ardupilot()
 #endif
 
     // initialise battery monitoring
+    K3_SETUP_TRACE("battery.init enter");
     battery.init();
+    K3_SETUP_TRACE("battery.init return");
 
 #if AP_RSSI_ENABLED
     rssi.init();
@@ -59,7 +82,9 @@ void Plane::init_ardupilot()
 #endif
 
     AP::compass().set_log_bit(MASK_LOG_COMPASS);
+    K3_SETUP_TRACE("compass.init enter");
     AP::compass().init();
+    K3_SETUP_TRACE("compass.init return");
 
 #if AP_AIRSPEED_ENABLED
     airspeed.set_fixedwing_parameters(&aparm);
@@ -68,7 +93,9 @@ void Plane::init_ardupilot()
 
     // GPS Initialization
     gps.set_log_gps_bit(MASK_LOG_GPS);
+    K3_SETUP_TRACE("gps.init enter");
     gps.init();
+    K3_SETUP_TRACE("gps.init return");
 
     init_rc_in();               // sets up rc channels from radio
 
@@ -116,14 +143,18 @@ void Plane::init_ardupilot()
     //INS ground start
     //------------------------
     //
+    K3_SETUP_TRACE("startup_INS enter");
     startup_INS();
+    K3_SETUP_TRACE("startup_INS return");
 
     // Save the settings for in-air restart
     // ------------------------------------
     //save_EEPROM_groundstart();
 
     // initialise mission library
+    K3_SETUP_TRACE("mission.init enter");
     mission.init();
+    K3_SETUP_TRACE("mission.init return");
 #if HAL_LOGGING_ENABLED
     mission.set_log_start_mission_item_bit(MASK_LOG_CMD);
 #endif
@@ -435,18 +466,56 @@ void Plane::startup_INS(void)
         gcs().send_text(MAV_SEVERITY_ALERT, "Skipping INS calibration");
     }
 
+    K3_SETUP_TRACE("ahrs.init enter");
     ahrs.init();
+    K3_SETUP_TRACE("ahrs.init return");
     ahrs.set_fly_forward(true);
     ahrs.set_vehicle_class(AP_AHRS::VehicleClass::FIXED_WING);
     ahrs.set_wind_estimation_enabled(true);
 
+    K3_SETUP_TRACE("ins.init enter");
     ins.init(scheduler.get_loop_rate_hz());
-    ahrs.reset();
+    K3_SETUP_TRACE("ins.init return");
+
+#if HAL_GEMSTONE_ALLOW_INIT_NO_INS
+    if (ins.get_gyro_count() == 0 && ins.get_accel_count() == 0) {
+        // AP_InertialSensor::wait_for_sample() assumes at least one gyro or
+        // accel exists -- with zero it has no exit path (its break
+        // conditions all require a non-zero available mask), and
+        // AP_AHRS_DCM::reset() calls it in a loop while priming attitude
+        // from the accelerometer. Skip only ahrs.reset() itself here, board-
+        // scoped to this explicit bench define; do not touch
+        // wait_for_sample() (generic, used by every board) or fake a
+        // healthy INS/AHRS. AP_Arming still fails normally ("Gyros not
+        // healthy") since no gyro/accel instance is ever registered.
+        trace_printf("AP-K3: ahrs.reset skipped: no INS, Gemstone bench mode\n");
+    } else
+#endif
+    {
+        K3_SETUP_TRACE("ahrs.reset enter");
+        ahrs.reset();
+        K3_SETUP_TRACE("ahrs.reset return");
+    }
 
     // read Baro pressure at ground
     //-----------------------------
+    K3_SETUP_TRACE("barometer.set_log_baro_bit enter");
     barometer.set_log_baro_bit(MASK_LOG_IMU);
+    K3_SETUP_TRACE("barometer.set_log_baro_bit return");
+    // NOTE: this used to hang forever -- zero baro backends on this board
+    // meant healthy() was permanently false, calibrate() hit its 500ms
+    // timeout and called AP_BoardConfig::config_error(), which never
+    // returns (a permanent while(true) retry loop in throw_error() that
+    // keeps calling gcs().update_receive()/update_send() -- explaining the
+    // lone captured TIMESYNC packet and the "first heartbeat queued" trace
+    // firing even though setup() never returned). Fixed by defining
+    // HAL_BARO_ALLOW_INIT_NO_BARO for this board (Tools/ardupilotwaf/
+    // boards.py), which makes calibrate() skip cleanly with zero backends.
+    K3_SETUP_TRACE("barometer.calibrate enter");
     barometer.calibrate();
+    K3_SETUP_TRACE("barometer.calibrate return");
+
+    K3_SETUP_TRACE("startup_INS: end of function body reached");
 }
 
 // sets notify object flight mode information

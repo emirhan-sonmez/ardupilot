@@ -44,6 +44,34 @@
 #include <AP_Scheduler/AP_Scheduler.h>
 #include "AP_InertialSensor_ZeroOne_FPGA_SCH16T.h"
 
+#if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
+#include <AP_HAL_ChibiOS_K3/hwdef/boot/trace.h>
+#define K3_INS_TRACE(msg) trace_printf("AP-K3: INS phase: " msg "\n")
+#else
+#define K3_INS_TRACE(msg) do {} while (0)
+#endif
+
+/*
+  HAL_GEMSTONE_ALLOW_INIT_NO_INS -- GemstoneO1R5F only, set via this board's
+  DEFINES in Tools/ardupilotwaf/boards.py. NOT a general CHIBIOS_K3 behavior;
+  every other board (present or future) on this HAL gets the default 0 below
+  and keeps the normal config_error() hang-on-no-INS behavior.
+
+  What this does:
+   - bench-only QGroundControl/MAVLink bring-up on a board with no SPI/I2C
+     device managers yet, so no IMU can be probed;
+   - registers no fake/synthetic sensor backend (unlike AP_InertialSensor_NONE);
+   - gyro and accelerometer instance counts stay at zero;
+   - normal arming checks still fail ("Gyros not healthy") -- the vehicle
+     remains unable to arm without a real IMU;
+   - remove this define once the real onboard ICM-20948 backend is
+     integrated (see /home/emirhan/Documents/gemstone/examples/imu for the
+     reference Linux userspace driver this will be ported from).
+*/
+#ifndef HAL_GEMSTONE_ALLOW_INIT_NO_INS
+#define HAL_GEMSTONE_ALLOW_INIT_NO_INS 0
+#endif
+
 /* Define INS_TIMING_DEBUG to track down scheduling issues with the main loop.
  * Output is on the debug console. */
 #ifdef INS_TIMING_DEBUG
@@ -865,11 +893,15 @@ bool AP_InertialSensor::register_accel(uint8_t &instance, uint16_t raw_sample_ra
 void AP_InertialSensor::_start_backends()
 
 {
+    K3_INS_TRACE("_start_backends: detect_backends enter");
     detect_backends();
+    K3_INS_TRACE("_start_backends: detect_backends return");
 
+    K3_INS_TRACE("_start_backends: per-backend start() enter");
     for (uint8_t i = 0; i < _backend_count; i++) {
         _backends[i]->start();
     }
+    K3_INS_TRACE("_start_backends: per-backend start() return");
 
 #if AP_INERTIALSENSOR_ALLOW_NO_SENSORS
     if (_gyro_count == 0 || _accel_count == 0) {
@@ -884,6 +916,7 @@ void AP_InertialSensor::_start_backends()
     for (uint8_t i=get_gyro_count(); i<INS_MAX_INSTANCES; i++) {
         _gyro_id(i).set(0);
     }
+    K3_INS_TRACE("_start_backends return");
 }
 
 /* Find the N instance of the backend that has already been successfully detected */
@@ -947,6 +980,8 @@ bool AP_InertialSensor::has_fft_notch() const
 void
 AP_InertialSensor::init(uint16_t loop_rate)
 {
+    K3_INS_TRACE("init enter");
+
     // remember the sample rate
     _loop_rate = loop_rate;
     _loop_delta_t = 1.0f / loop_rate;
@@ -964,14 +999,23 @@ AP_InertialSensor::init(uint16_t loop_rate)
 #endif
 
     if (_gyro_count == 0 && _accel_count == 0) {
+        K3_INS_TRACE("_start_backends enter");
         _start_backends();
+        K3_INS_TRACE("_start_backends return");
     }
 
     // calibrate gyros unless gyro calibration has been disabled
     if (gyro_calibration_timing() != GYRO_CAL_NEVER && _gyro_count > 0) {
+        K3_INS_TRACE("init_gyro (gyro calibration) enter");
         init_gyro();
+        K3_INS_TRACE("init_gyro (gyro calibration) return");
+    } else {
+        K3_INS_TRACE("init_gyro skipped (gyro cal disabled or zero gyros)");
     }
 
+    // sample-rate / orientation setup below is plain field assignment for
+    // this board (no per-backend work when _backend_count == 0)
+    K3_INS_TRACE("sample-rate/orientation setup enter");
     _sample_period_usec = 1000*1000UL / _loop_rate;
 
     // establish the baseline time between samples
@@ -1110,6 +1154,7 @@ AP_InertialSensor::init(uint16_t loop_rate)
         tcal_learning = true;
     }
 #endif
+    K3_INS_TRACE("init return");
 }
 
 bool AP_InertialSensor::_add_backend(AP_InertialSensor_Backend *backend)
@@ -1131,7 +1176,9 @@ bool AP_InertialSensor::_add_backend(AP_InertialSensor_Backend *backend)
 void
 AP_InertialSensor::detect_backends(void)
 {
+    K3_INS_TRACE("detect_backends enter");
     if (_backends_detected) {
+        K3_INS_TRACE("detect_backends: already detected, return");
         return;
     }
 
@@ -1305,7 +1352,10 @@ AP_InertialSensor::detect_backends(void)
     #error Unrecognised HAL_INS_TYPE setting
 #endif
 
+    K3_INS_TRACE("detect_backends: board probe switch complete");
+
     if (_backend_count == 0) {
+        K3_INS_TRACE("detect_backends: backend_count==0");
 
         // no real INS backends avail, lets use an empty substitute to boot ok and get to mavlink
         #if CONFIG_HAL_BOARD == HAL_BOARD_ESP32
@@ -1313,11 +1363,25 @@ AP_InertialSensor::detect_backends(void)
         #else
         DEV_PRINTF("INS: unable to initialise driver\n");
         GCS_SEND_TEXT(MAV_SEVERITY_DEBUG, "INS: unable to initialise driver");
-        #if !AP_INERTIALSENSOR_ALLOW_NO_SENSORS
+        // Skip config_error()'s permanent while(true) retry loop only when
+        // HAL_GEMSTONE_ALLOW_INIT_NO_INS is explicitly set (GemstoneO1R5F
+        // bench bring-up -- see the comment on its #define above). Every
+        // other board, including every other CHIBIOS_K3 board, keeps the
+        // normal hang-on-no-INS behavior. Deliberately NOT using
+        // AP_INERTIALSENSOR_ALLOW_NO_SENSORS -- it has a second,
+        // differently-gated check further down in _start_backends() that
+        // panics instead when this macro is set and the backend count is
+        // genuinely zero. No synthetic sensor is registered here, so
+        // _gyro_count/_accel_count stay 0 and AP_Arming::ins_checks() still
+        // correctly fails -- the vehicle remains unable to arm.
+        #if HAL_GEMSTONE_ALLOW_INIT_NO_INS
+        K3_INS_TRACE("detect_backends: config_error() intentionally skipped, no-INS bench continuation enabled");
+        #elif !AP_INERTIALSENSOR_ALLOW_NO_SENSORS
         AP_BoardConfig::config_error("INS: unable to initialise driver");
         #endif
         #endif
     }
+    K3_INS_TRACE("detect_backends return");
 }
 
 // Armed, Copter, PixHawk:
@@ -2094,6 +2158,28 @@ void AP_InertialSensor::wait_for_sample(void)
     }
 
 check_sample:
+#if HAL_GEMSTONE_ALLOW_INIT_NO_INS
+    if (_gyro_count == 0 && _accel_count == 0) {
+        // GemstoneO1R5F bench mode: no gyro/accel exists, so the sensor
+        // sample-wait below can never see gyro_available_mask/
+        // accel_available_mask go non-zero -- every one of its break
+        // conditions requires a non-zero mask, so it would spin forever.
+        // The period-matched delay above (_next_sample_usec derived from
+        // _sample_period_usec, the SAME "already configured" loop period
+        // every board uses, computed unconditionally before reaching this
+        // label) already paced this call -- that delay is untouched and is
+        // what prevents an uncontrolled max-speed loop here. This branch
+        // only skips the sensor-dependent inner wait; it sets no
+        // gyro/accel sample-available mask and marks no sensor healthy
+        // (update()'s _gyro_healthy[]/_accel_healthy[] reset is untouched).
+        static bool traced;
+        if (!traced) {
+            traced = true;
+            trace_printf("AP-K3: wait_for_sample using software timing: no INS bench mode\n");
+        }
+    } else
+#endif
+    {
         // now we wait until we have the gyro and accel samples we need
         uint8_t gyro_available_mask = 0;
         uint8_t accel_available_mask = 0;
@@ -2157,6 +2243,7 @@ check_sample:
             hal.scheduler->delay_microseconds_boost(wait_per_loop);
             wait_counter++;
         }
+    }
 
     now = AP_HAL::micros();
     _delta_time = (now - _last_sample_usec) * 1.0e-6f;

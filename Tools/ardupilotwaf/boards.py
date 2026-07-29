@@ -1425,6 +1425,36 @@ class GemstoneO1R5F(Board):
             HAL_WITH_EKF_DOUBLE = 0,       # single-precision EKF on the R5F for now
             HAL_NUM_CAN_IFACES = 0,        # K3 MCAN not ported yet (Phase 3b)
             HAL_GYROFFT_ENABLED = 0,       # no DSP backend -> also sets HAL_WITH_DSP=0
+            # M2 root-cause fix: no baro backend is registered on this board
+            # (no I2C/SPI device managers yet), so AP_Baro::calibrate() found
+            # zero sensors, healthy() was permanently false, and it hit
+            # AP_BoardConfig::config_error() -> throw_error()'s permanent
+            # while(true) retry loop -- setup() never returned. This macro
+            # (already used by several no-baro ArduPilot boards) makes
+            # calibrate() skip cleanly instead. Sensors remain out of scope
+            # for this milestone; AP_Arming will still correctly flag "no
+            # baro" as a prearm failure, so the vehicle still cannot arm.
+            HAL_BARO_ALLOW_INIT_NO_BARO = 1,
+            # M2 INS hang, same shape as the baro one: AP_InertialSensor::
+            # detect_backends() hit the identical config_error() ->
+            # throw_error() permanent while(true) with zero registered
+            # backends (HAL_INS_DEFAULT=HAL_INS_NONE, no SPI/I2C device
+            # managers yet). NOT using AP_INERTIALSENSOR_ALLOW_NO_SENSORS or
+            # AP_InertialSensor_NONE (ESP32's fake-sensor backend) -- see the
+            # HAL_GEMSTONE_ALLOW_INIT_NO_INS comment in AP_InertialSensor.cpp
+            # for why both were rejected. This define is GemstoneO1R5F-only
+            # (not a CHIBIOS_K3-wide condition), registers no synthetic
+            # sensor, and does not weaken AP_Arming's INS prearm check.
+            # Remove once the real onboard ICM-20948 backend is integrated;
+            # see /home/emirhan/Documents/gemstone/examples/imu.
+            HAL_GEMSTONE_ALLOW_INIT_NO_INS = 1,
+            # M2: SERIAL0 (the only wired UART -- SD1/AM67 UART1, header pins
+            # 8 TX / 10 RX) is the first MAVLink transport. MAVLink2 at these
+            # values is already AP_SerialManager's compiled-in default when
+            # neither macro is defined; set explicitly so the board's intent
+            # does not depend on that upstream default staying unchanged.
+            DEFAULT_SERIAL0_PROTOCOL = 2,       # SerialProtocol_MAVLink2
+            DEFAULT_SERIAL0_BAUD = 115200,
         )
         env.AP_LIBRARIES += [
             'AP_HAL_ChibiOS_K3',

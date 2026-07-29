@@ -21,6 +21,10 @@
 
 #include "GCS.h"
 
+#if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
+#include <AP_HAL_ChibiOS_K3/hwdef/boot/trace.h>  // RemoteProc trace0, no console text on the MAVLink UART
+#endif
+
 #include <AC_Fence/AC_Fence.h>
 #include <AP_Compass/AP_Compass.h>
 #include <AP_ADSB/AP_ADSB.h>
@@ -240,6 +244,11 @@ bool GCS_MAVLINK::init(uint8_t instance)
         is_high_latency_link = true;
     }
 #endif
+
+#if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
+    trace_printf("AP-K3: MAVLink channel %u initialized\n", (uint32_t)chan);
+#endif
+
     return true;
 }
 
@@ -3169,6 +3178,24 @@ MAV_STATE GCS_MAVLINK::system_status() const
  */
 void GCS_MAVLINK::send_heartbeat() const
 {
+#if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
+    static bool traced;
+    if (!traced) {
+        traced = true;
+        // Msg ID printed explicitly (HEARTBEAT is always 0) so this can
+        // never again be confused with a different message actually seen on
+        // the wire (e.g. TIMESYNC, id 111). NOTE: this only proves
+        // send_heartbeat() was entered -- it does not prove any byte
+        // reached the wire (see "comm_send_buffer #N wrote=..." / "UART
+        // write #N ... accepted=" further down the send path). It can also
+        // legitimately fire from update_send() called repeatedly inside
+        // AP_BoardConfig::throw_error()'s retry loop, not only from the
+        // normal post-setup main loop -- do not treat this trace alone as
+        // evidence that setup() has returned.
+        trace_printf("AP-K3: HEARTBEAT msg_id=0 queued (chan=%u)\n", (uint32_t)chan);
+    }
+#endif
+
     mavlink_msg_heartbeat_send(
         chan,
         gcs().frame_type(),

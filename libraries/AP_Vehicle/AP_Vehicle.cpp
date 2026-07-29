@@ -29,6 +29,13 @@ extern AP_IOMCU iomcu;
 #include <AP_Scripting/AP_Scripting.h>
 #include <SITL/SITL.h>
 
+#if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
+#include <AP_HAL_ChibiOS_K3/hwdef/boot/trace.h>
+#define K3_SETUP_TRACE(msg) trace_printf("AP-K3: setup phase: " msg "\n")
+#else
+#define K3_SETUP_TRACE(msg) do {} while (0)
+#endif
+
 #define SCHED_TASK(func, rate_hz, max_time_micros, prio) SCHED_TASK_CLASS(AP_Vehicle, &vehicle, func, rate_hz, max_time_micros, prio)
 
 /*
@@ -333,7 +340,9 @@ void AP_Vehicle::setup()
     // validate the static parameter table, then load persistent
     // values from storage:
     AP_Param::check_var_info();
+    K3_SETUP_TRACE("load_parameters enter");
     load_parameters();
+    K3_SETUP_TRACE("load_parameters return");
 
 #if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS
     if (AP_BoardConfig::get_sdcard_slowdown() != 0) {
@@ -345,6 +354,7 @@ void AP_Vehicle::setup()
 
 #if AP_SCHEDULER_ENABLED
     // initialise the main loop scheduler
+    K3_SETUP_TRACE("AP_Scheduler init enter");
     const AP_Scheduler::Task *tasks;
     uint8_t task_count;
     uint32_t log_bit;
@@ -354,6 +364,7 @@ void AP_Vehicle::setup()
     // time per loop - this gets updated in the main loop() based on
     // actual loop rate
     G_Dt = scheduler.get_loop_period_s();
+    K3_SETUP_TRACE("AP_Scheduler init return");
 #endif
 
     // this is here for Plane; its failsafe_check method requires the
@@ -366,7 +377,9 @@ void AP_Vehicle::setup()
     // diagnostic output during boot process.  We have to initialise
     // the GCS singleton first as it sets the global mavlink system ID
     // which may get used very early on.
+    K3_SETUP_TRACE("gcs().init enter");
     gcs().init();
+    K3_SETUP_TRACE("gcs().init return");
 #endif
 
 #if AP_SERIALMANAGER_ENABLED
@@ -376,7 +389,9 @@ void AP_Vehicle::setup()
     }
 #endif
     // initialise serial ports
+    K3_SETUP_TRACE("serial_manager.init enter");
     serial_manager.init();
+    K3_SETUP_TRACE("serial_manager.init return");
 #endif
 #if HAL_GCS_ENABLED
     gcs().setup_console();
@@ -414,7 +429,9 @@ void AP_Vehicle::setup()
     stats.init();
 #endif
 
+    K3_SETUP_TRACE("BoardConfig.init enter");
     BoardConfig.init();
+    K3_SETUP_TRACE("BoardConfig.init return");
 
 #if HAL_CANMANAGER_ENABLED
     can_mgr.init();
@@ -426,7 +443,9 @@ void AP_Vehicle::setup()
 #endif
 
 #if HAL_LOGGING_ENABLED
+    K3_SETUP_TRACE("logger.init enter");
     logger.init(get_log_bitmask(), get_log_structures(), get_num_log_structures());
+    K3_SETUP_TRACE("logger.init return");
 #endif
 
     // init cargo gripper
@@ -440,17 +459,21 @@ void AP_Vehicle::setup()
 #endif  // AP_BEACON_ENABLED
 
     // init_ardupilot is where the vehicle does most of its initialisation.
+    K3_SETUP_TRACE("init_ardupilot enter");
     init_ardupilot();
+    K3_SETUP_TRACE("init_ardupilot return");
 
 #if AP_SCRIPTING_ENABLED
     scripting.init();
 #endif // AP_SCRIPTING_ENABLED
 
 #if AP_AIRSPEED_ENABLED
+    K3_SETUP_TRACE("airspeed.init enter");
     airspeed.init();
+    K3_SETUP_TRACE("airspeed.init return");
     if (airspeed.enabled()) {
         airspeed.calibrate(true);
-    } 
+    }
 #if APM_BUILD_TYPE(APM_BUILD_ArduPlane)
     else {
         GCS_SEND_TEXT(MAV_SEVERITY_INFO, "No airspeed sensor");

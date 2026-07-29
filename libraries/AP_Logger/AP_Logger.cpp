@@ -23,6 +23,10 @@ AP_Logger *AP_Logger::_singleton;
 
 extern const AP_HAL::HAL& hal;
 
+#if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
+#include <AP_HAL_ChibiOS_K3/hwdef/boot/trace.h>
+#endif
+
 #ifndef HAL_LOGGING_FILE_BUFSIZE
 #if HAL_MEM_CLASS >= HAL_MEM_CLASS_1000
 // adjust buffer size for extra space allocated on more capable boards
@@ -1454,10 +1458,18 @@ bool AP_Logger::check_crash_dump_save(void)
 // is necessary to run the IO in it's own thread
 void AP_Logger::io_thread(void)
 {
+#if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
+    trace_printf("AP-K3: log_io thread entry\n");
+#endif
+
     uint32_t last_run_us = AP_HAL::micros();
     uint32_t last_stack_us = last_run_us;
     uint32_t last_crash_check_us = last_run_us;
     bool done_crash_dump_save = false;
+
+#if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
+    bool traced_first_iter = false;
+#endif
 
     while (true) {
         uint32_t now = AP_HAL::micros();
@@ -1466,7 +1478,19 @@ void AP_Logger::io_thread(void)
         if (now - last_run_us < 1000) {
             delay = MAX(1000 - (now - last_run_us), delay);
         }
+#if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
+        if (!traced_first_iter) {
+            trace_printf("AP-K3: log_io thread first iteration, delay_us=%u, "
+                         "about to sleep\n", delay);
+        }
+#endif
         hal.scheduler->delay_microseconds(delay);
+#if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
+        if (!traced_first_iter) {
+            traced_first_iter = true;
+            trace_printf("AP-K3: log_io thread first sleep returned\n");
+        }
+#endif
 
         last_run_us = AP_HAL::micros();
 
@@ -1492,15 +1516,27 @@ void AP_Logger::io_thread(void)
 // start the update thread
 void AP_Logger::start_io_thread(void)
 {
+#if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
+    trace_printf("AP-K3: start_io_thread: taking _log_send_sem\n");
+#endif
     WITH_SEMAPHORE(_log_send_sem);
+#if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
+    trace_printf("AP-K3: start_io_thread: _log_send_sem taken\n");
+#endif
 
     if (_io_thread_started) {
         return;
     }
 
+#if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
+    trace_printf("AP-K3: start_io_thread: thread_create(log_io) enter\n");
+#endif
     if (!hal.scheduler->thread_create(FUNCTOR_BIND_MEMBER(&AP_Logger::io_thread, void), "log_io", HAL_LOGGING_STACK_SIZE, AP_HAL::Scheduler::PRIORITY_IO, 1)) {
         AP_HAL::panic("Failed to start Logger IO thread");
     }
+#if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
+    trace_printf("AP-K3: start_io_thread: thread_create(log_io) returned OK\n");
+#endif
 
     _io_thread_started = true;
     return;
