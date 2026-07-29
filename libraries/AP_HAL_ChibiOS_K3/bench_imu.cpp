@@ -105,31 +105,49 @@ bool spi_started;
 uint8_t attempts;
 int8_t current_bank = -1;
 
+/*
+  Every transfer here is polled (spiPolledExchange), never the driver's
+  interrupt-driven spiExchange/spiSend.
+
+  spiExchange() sleeps the calling thread until the transfer-complete
+  interrupt arrives and has no timeout: if the interrupt never comes -- a
+  gated module clock, a channel that never asserts RX_FULL -- the main
+  thread is gone for good and the board looks frozen with no diagnostic at
+  all. That is exactly what the first attempt at this did: the trace ended
+  at "6 RCOutput channels safe-initialized" with nothing after it.
+
+  spi_lld_polled_exchange() busy-waits on CHSTAT with a bounded loop and
+  reports SPID1.xfer_timeout, so a dead bus costs milliseconds and says so.
+  At 50 Hz over 15 bytes the extra CPU is irrelevant. The interrupt path
+  stays in the driver for the real AP_HAL SPIDevice to use later, once the
+  bus itself is proven.
+*/
+bool xfer_failed;
+
+uint8_t spi_xfer_byte(uint8_t out)
+{
+    const uint8_t in = (uint8_t)spiPolledExchange(&SPID1, out);
+    if (SPID1.xfer_timeout) {
+        xfer_failed = true;
+    }
+    return in;
+}
+
 void spi_read(uint8_t reg, uint8_t *buf, uint8_t len)
 {
-    // The controller clocks out len+1 bytes and reads every one of them from
-    // the TX buffer, so both buffers must cover the whole transfer.
-    uint8_t tx[16] = {};
-    uint8_t rx[16] = {};
-
-    if (len > sizeof(tx) - 1) {
-        return;
-    }
-    tx[0] = reg | BIT_READ;
-
     spiSelect(&SPID1);
-    spiExchange(&SPID1, len + 1u, tx, rx);
+    spi_xfer_byte((uint8_t)(reg | BIT_READ));
+    for (uint8_t i = 0; i < len; i++) {
+        buf[i] = spi_xfer_byte(0);
+    }
     spiUnselect(&SPID1);
-
-    memcpy(buf, &rx[1], len);
 }
 
 void spi_write(uint8_t reg, uint8_t value)
 {
-    const uint8_t tx[2] = { reg, value };
-
     spiSelect(&SPID1);
-    spiSend(&SPID1, sizeof(tx), tx);
+    spi_xfer_byte(reg);
+    spi_xfer_byte(value);
     spiUnselect(&SPID1);
 }
 
@@ -164,33 +182,67 @@ bool imu_try_bringup()
 
     attempts++;
 
+    // Step-by-step trace on the first attempt only. The first version of
+    // this module died silently somewhere in here, and "which register
+    // access was the last one to complete" is the only thing that
+    // distinguishes a gated clock from a bus fault from a hung transfer.
+    const bool verbose = (attempts == 1);
+
+    // MCU_GPIO0 is a different peripheral, whose clock/power state nothing
+    // here manages -- if it is gated, this access is the one that faults.
+    // Traced on both sides so a silent stop points at the exact write.
+    if (verbose) {
+        trace_printf("AP-K3: imu: asserting IMU enable (MCU_GPIO0_12)...\n");
+    }
+    am67_spi0_imu_enable();
+    if (verbose) {
+        trace_printf("AP-K3: imu: IMU enable done, spiStart...\n");
+    }
     spiStart(&SPID1, &spicfg);
     spi_started = true;
     if (!SPID1.ready) {
         // Same failure mode as the PWM peripherals: the module never left
         // reset, which on this SoC means its clock is gated because Linux
         // still owns it.
-        if (attempts == 1) {
+        if (verbose) {
             trace_printf("AP-K3: imu: MCSPI0 not ready (clock gated? spi not unbound from Linux?), retrying\n");
         }
         return false;
     }
+    if (verbose) {
+        trace_printf("AP-K3: imu: MCSPI0 ready, probing CS%u...\n", SPI_CS_CHANNEL);
+    }
 
     // Cheap probe before committing to the reset sequence: WHO_AM_I answers
-    // in any state, so a bus that is not ours yet costs a few microseconds
-    // per retry instead of the 120ms the reset settling below takes.
+    // in any state, so a bus that is not ours yet costs milliseconds per
+    // retry instead of the 120ms the reset settling below takes.
+    xfer_failed = false;
     current_bank = -1;
     set_bank(0);
     who = read_reg(REG_WHO_AM_I);
+    if (xfer_failed) {
+        // CHSTAT never reported the transfer done: the module is mapped and
+        // out of reset, but nothing is clocking. Distinct from a wrong
+        // WHO_AM_I value, which means the bus works and the part does not
+        // answer.
+        if (verbose) {
+            trace_printf("AP-K3: imu: SPI transfer timed out on CS%u (module clocked but not transferring), retrying\n",
+                         SPI_CS_CHANNEL);
+        }
+        return false;
+    }
     if (who != WHO_AM_I_VAL) {
         // 0x00 or 0xFF here is the signature of a bus nobody is driving:
         // Linux still bound, wrong chip select, or the IMU enable line not
         // asserted. A plausible-but-wrong value would mean a different part.
-        if (attempts == 1) {
+        if (verbose) {
             trace_printf("AP-K3: imu: WHO_AM_I=%x, expected %x on CS%u, retrying\n",
                          who, WHO_AM_I_VAL, SPI_CS_CHANNEL);
         }
         return false;
+    }
+    if (verbose) {
+        trace_printf("AP-K3: imu: WHO_AM_I=%x on first probe, resetting...\n", who);
     }
 
     // Reset, then wake. The reset takes tens of milliseconds; reading back
