@@ -4,6 +4,8 @@
 
 #include <AP_HAL/system.h>
 #include <ch.h>
+#include <stdarg.h>
+#include "hwdef/boot/trace.h"
 
 /*
   AP_HAL:: system services for the AM67/K3 board, backed by ChibiOS/RT time.
@@ -21,7 +23,14 @@ void init()
 
 void panic(const char *errormsg, ...)
 {
-    (void)errormsg;
+    va_list ap;
+
+    trace_printf("AP-K3: PANIC: ");
+    va_start(ap, errormsg);
+    trace_vprintf(errormsg, ap);
+    va_end(ap);
+    trace_printf("\n");
+
     // No console guaranteed here; halt honestly.
     while (true) {
     }

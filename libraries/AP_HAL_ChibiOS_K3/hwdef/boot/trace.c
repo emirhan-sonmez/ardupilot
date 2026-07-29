@@ -96,11 +96,17 @@ void trace_init(void) {
 
 void trace_printf(const char *fmt, ...) {
   va_list ap;
+
+  va_start(ap, fmt);
+  trace_vprintf(fmt, ap);
+  va_end(ap);
+}
+
+void trace_vprintf(const char *fmt, va_list ap) {
   uint32_t sts;
 
   sts = irq_save();
 
-  va_start(ap, fmt);
   while (*fmt != '\0') {
     if (*fmt != '%') {
       trace_putc(*fmt++);
@@ -140,7 +146,6 @@ void trace_printf(const char *fmt, ...) {
       break;
     }
   }
-  va_end(ap);
 
   irq_restore(sts);
 }

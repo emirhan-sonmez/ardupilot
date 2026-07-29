@@ -24,11 +24,17 @@
 #ifndef TRACE_H
 #define TRACE_H
 
+#include <stdarg.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
   void trace_init(void);
   void trace_printf(const char *fmt, ...);
+  /* va_list variant, for forwarding varargs already captured by a caller
+     (e.g. AP_HAL::panic(const char *errormsg, ...)). Same minimal format
+     subset as trace_printf: %s, %c, %d, %u, %x, %%. */
+  void trace_vprintf(const char *fmt, va_list ap);
 #ifdef __cplusplus
 }
 #endif
