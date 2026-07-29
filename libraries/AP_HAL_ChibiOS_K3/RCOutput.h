@@ -34,6 +34,15 @@ public:
     void     cork() override {}
     void     push() override {}
 
+    // Re-attempts enable_ch() for any channel not yet enabled. Cheap
+    // (~5ms per still-dead peripheral, no busy loop) -- the Linux PWM
+    // clock a peripheral depends on is commonly enabled well after this
+    // firmware has already booted (see the ArduPilot iBus Port Handoff,
+    // section 6), so a channel that failed at boot-time safe-init can
+    // recover once that script runs, without needing a reboot. Call
+    // periodically, not every loop tick.
+    void     retry_pending();
+
 private:
     static const uint8_t  NUM_CH = 6;
     static const uint8_t  NUM_PERIPH = 5;      // EPWM0, EPWM1, ECAP0, ECAP1, ECAP2
@@ -41,7 +50,7 @@ private:
     static const uint16_t PWM_MAX_US = 2000;
 
     bool ensure_peripheral(uint8_t p);         // wait for clock, start once
-    bool wait_for_timebase(uint8_t p);         // TBCTR/TSCTR advancing?
+    bool wait_for_timebase(uint8_t p, uint16_t max_tries);  // TBCTR/TSCTR advancing?
     void hw_set(uint8_t chan, uint16_t us);    // drive the right compare reg
 
     uint16_t _freq_hz = 50;

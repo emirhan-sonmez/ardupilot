@@ -66,11 +66,13 @@ uint16_t RCOutput::get_freq(uint8_t chan)
     return (chan < NUM_CH) ? _freq_hz : 0;
 }
 
-bool RCOutput::wait_for_timebase(uint8_t p)
+bool RCOutput::wait_for_timebase(uint8_t p, uint16_t max_tries)
 {
     const periph_desc &d = PERIPH[p];
-    // Bounded (~5 s): counter must advance, else its clock gate never started.
-    for (uint16_t tries = 0; tries < 16; tries++) {
+    // Counter must advance, else its clock gate never started. max_tries=16
+    // (~5 s, the boot-time safe-init path) vs. max_tries=1 (~5ms, the cheap
+    // periodic retry_pending() path) -- see ensure_peripheral().
+    for (uint16_t tries = 0; tries < max_tries; tries++) {
         uint32_t a = d.is_ecap ? ecap_read_tsctr(d.base) : ehrpwm_read_tbctr(d.base);
         chThdSleepMilliseconds(5);
         uint32_t b = d.is_ecap ? ecap_read_tsctr(d.base) : ehrpwm_read_tbctr(d.base);
@@ -78,10 +80,10 @@ bool RCOutput::wait_for_timebase(uint8_t p)
             trace_printf("rcout: periph %u timebase running\n", (uint32_t)p);
             return true;
         }
-        chThdSleepMilliseconds(300);
+        if ((tries + 1) < max_tries) {
+            chThdSleepMilliseconds(300);
+        }
     }
-    trace_printf("rcout: periph %u CLOCK TIMEOUT (counter never advanced)\n",
-                 (uint32_t)p);
     return false;
 }
 
@@ -90,13 +92,23 @@ bool RCOutput::ensure_peripheral(uint8_t p)
     if (_p_started[p]) {
         return true;
     }
-    if (_p_failed[p]) {
-        return false;
-    }
-    if (!wait_for_timebase(p)) {
+    // First-ever attempt for this peripheral gets the full bounded wait
+    // (boot-time safe-init, nothing else to do yet); a peripheral that
+    // already failed once gets a cheap single-shot recheck instead of a
+    // permanent latch -- the Linux PWM clock it depends on is commonly
+    // enabled well after boot (ArduPilot iBus Port Handoff, section 6),
+    // and the ChibiOS demo this was ported from recovers the same way via
+    // its own pt_init() retry rather than requiring a reboot.
+    const uint16_t max_tries = _p_failed[p] ? 1 : 16;
+    if (!wait_for_timebase(p, max_tries)) {
+        if (!_p_failed[p]) {
+            trace_printf("rcout: periph %u CLOCK TIMEOUT (counter never advanced)\n",
+                         (uint32_t)p);
+        }
         _p_failed[p] = true;
         return false;
     }
+    _p_failed[p] = false;
     if (PERIPH[p].is_ecap) {
         ecap_start(PERIPH[p].base, _freq_hz);
     } else {
@@ -106,6 +118,15 @@ bool RCOutput::ensure_peripheral(uint8_t p)
     trace_printf("rcout: periph %u started (freq=%u)\n",
                  (uint32_t)p, (uint32_t)_freq_hz);
     return true;
+}
+
+void RCOutput::retry_pending()
+{
+    for (uint8_t chan = 0; chan < NUM_CH; chan++) {
+        if (!_ch_enabled[chan]) {
+            enable_ch(chan);
+        }
+    }
 }
 
 void RCOutput::hw_set(uint8_t chan, uint16_t us)
@@ -123,10 +144,27 @@ void RCOutput::enable_ch(uint8_t chan)
     if (chan >= NUM_CH) {
         return;                              // ignore out-of-range safely
     }
+    if (_ch_enabled[chan]) {
+        return;                              // already enabled -- callers
+                                              // (Plane's own servo output,
+                                              // this port's retry_pending())
+                                              // call this every cycle, and
+                                              // re-running the body below
+                                              // unconditionally, trace print
+                                              // included, filled the 16 KiB
+                                              // trace buffer within seconds.
+    }
     const chan_desc &c = CHAN[chan];
     if (!ensure_peripheral(c.periph)) {
-        trace_printf("rcout: ch%u NOT enabled (periph %u clock failed)\n",
-                     (uint32_t)chan, (uint32_t)c.periph);
+        // Bounded: retry_pending() calls this repeatedly for a channel
+        // whose peripheral clock genuinely never comes up, which would
+        // otherwise spam this line forever.
+        static uint8_t fail_trace_count;
+        if (fail_trace_count < NUM_CH) {
+            fail_trace_count++;
+            trace_printf("rcout: ch%u NOT enabled (periph %u clock failed)\n",
+                         (uint32_t)chan, (uint32_t)c.periph);
+        }
         return;                              // do not enable if clock failed
     }
     if (!PERIPH[c.periph].is_ecap) {
@@ -169,6 +207,17 @@ void RCOutput::write(uint8_t chan, uint16_t period_us)
         return;
     }
     hw_set(chan, period_us);
+
+    // Diagnostics only, bounded. Once the vehicle main loop is running,
+    // SRV_Channels writes every channel every iteration, so an unbounded
+    // trace here floods the 16 KiB RemoteProc trace buffer within a few
+    // loops and hides everything logged after it (trace.c stops accepting
+    // once full). PWM behaviour above is unchanged.
+    static uint8_t write_trace_count;
+    if (write_trace_count >= 24) {          // ~4 loops x 6 channels
+        return;
+    }
+    write_trace_count++;
 
     const chan_desc &c = CHAN[chan];
     if (PERIPH[c.periph].is_ecap) {
