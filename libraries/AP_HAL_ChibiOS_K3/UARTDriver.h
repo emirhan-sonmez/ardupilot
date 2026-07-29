@@ -31,4 +31,9 @@ protected:
 private:
     void *_sd;          // ChibiOS SerialDriver*
     bool _initialized;
+
+    // TX diagnostics: bounded, first-few-calls-only (see .cpp). Not a
+    // behavior change -- purely for tracing the MAVLink TX path over trace0.
+    uint8_t _begin_count;
+    uint8_t _write_trace_count;
 };

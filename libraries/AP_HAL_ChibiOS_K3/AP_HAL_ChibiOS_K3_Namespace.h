@@ -22,4 +22,5 @@ namespace ChibiOS_K3 {
     class Util;
     class UARTDriver;
     class RCOutput;
+    class RCInput;
 }
