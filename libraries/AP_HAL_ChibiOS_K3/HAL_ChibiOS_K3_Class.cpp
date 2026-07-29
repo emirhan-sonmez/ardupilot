@@ -24,6 +24,7 @@
 #include "RCOutput.h"
 #include "RCInput.h"
 #include "bench_passthrough.h"
+#include "bench_imu.h"
 #include <hal.h>   // for the ChibiOS SerialDriver SD1
 #include "hwdef/boot/trace.h"  // RemoteProc trace buffer (readable without UART)
 #include "hwdef/boot/stack_paint.h"  // Q-25: SYS/main-thread stack high-water mark
@@ -153,6 +154,12 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
     }
     trace_printf("AP-K3: 6 RCOutput channels safe-initialized at 1000us\n");
 
+    // Bench ICM-20948 bring-up on MCU_MCSPI0 CS3. Before setup(), so a
+    // wrong chip select or a bus Linux still owns shows up as its own trace
+    // line rather than being lost among the vehicle's own init output.
+    // Reports and returns on failure -- never blocks the boot.
+    ChibiOS_K3::bench_imu_init();
+
     trace_printf("AP-K3: entering vehicle setup()\n");
     callbacks->setup();
     trace_printf("AP-K3: setup() returned\n");
@@ -212,6 +219,10 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
         // last and unconditionally overwrites them with the arm-gated
         // value every tick. PROPELLERS OFF.
         ChibiOS_K3::bench_passthrough_update();
+
+        // Sensor read-out, rate-limited internally (50 Hz sample, 1 Hz
+        // trace line). No-op until bench_imu_init() found the part.
+        ChibiOS_K3::bench_imu_update();
 
         // Keep the UART TX draining independently of driver calls (the THRE
         // interrupt is not firing on this UART -- see am67_uart1_tx_pump()).
