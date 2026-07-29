@@ -56,7 +56,8 @@ LDSCRIPT = $(HWDEF_DIR)/AM67_R5F.ld
 # ChibiOS sources + board boot infra (resource table + remoteproc trace).
 CSRC = $(ALLCSRC) \
        $(HWDEF_DIR)/boot/rsc_table.c \
-       $(HWDEF_DIR)/boot/trace.c
+       $(HWDEF_DIR)/boot/trace.c \
+       $(HWDEF_DIR)/boot/stack_paint.c
 CPPSRC  = $(ALLCPPSRC)
 ACSRC   =
 ACPPSRC =

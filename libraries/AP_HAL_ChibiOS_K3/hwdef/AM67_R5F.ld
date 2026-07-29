@@ -27,7 +27,24 @@ __abt_stack_size__ = DEFINED(__abt_stack_size__) ? __abt_stack_size__ : 0x100;
 __fiq_stack_size__ = DEFINED(__fiq_stack_size__) ? __fiq_stack_size__ : 0x100;
 __irq_stack_size__ = DEFINED(__irq_stack_size__) ? __irq_stack_size__ : 0x400;
 __svc_stack_size__ = DEFINED(__svc_stack_size__) ? __svc_stack_size__ : 0x100;
-__sys_stack_size__ = DEFINED(__sys_stack_size__) ? __sys_stack_size__ : 0x800;
+
+/* Q-25: 0x800 (2048 B) is not enough for ArduPlane's main-thread call chain
+   (AP_AHRS::update() -> DCM::update() -> drift_correction() alone measures
+   ~1248 B at the -O0 build waf uses for AP objects); the overflow silently
+   corrupted the SVC/IRQ stacks below it with every debug detector in
+   chconf.h left off, which is why the loop died after exactly one
+   iteration with no trace line and no fault. 0x2000 (8192 B) leaves >15k
+   of the 23.4k free TCM untouched; still short of upstream ArduPilot's own
+   PROCESS_STACK default (0x1C00) but comfortable headroom over the
+   measured chain. Revisit if NavEKF3_core::CovariancePrediction (952 B
+   alone) ends up in the same call path.*/
+__sys_stack_size__ = DEFINED(__sys_stack_size__) ? __sys_stack_size__ : 0x2000;
+
+/* Core 1 is unused on this board (single R5F, no SMP boot path) but
+   rules_stacks_c1.ld mirrors every __c1_*_stack_size__ default onto its
+   c0 counterpart, so leaving this undefined would silently double the
+   sys-stack TCM cost for a core that never runs. Pin it back down. */
+__c1_sys_stack_size__ = DEFINED(__c1_sys_stack_size__) ? __c1_sys_stack_size__ : 0x100;
 
 MEMORY
 {

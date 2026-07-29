@@ -269,8 +269,19 @@
  * @note    The default is @p FALSE.
  * @note    Requires @p CH_CFG_USE_MUTEXES.
  */
+/* Q-25 root cause: ArduPilot's GCS_MAVLink code legitimately re-enters the
+   same channel semaphore on one thread -- GCS_MAVLINK::do_try_send_message()
+   takes comm_chan_lock(chan) via WITH_SEMAPHORE, then the MAVLink library's
+   own packing code (MAVLINK_START_UART_SEND -> comm_send_lock()) takes the
+   very same chan_locks[chan] mutex again before the outer scope releases it.
+   Stock AP_HAL_ChibiOS's hwdef/common/chconf.h sets this TRUE for exactly
+   that reason. Left at the ChibiOS default (FALSE) here, the second lock
+   put the main thread to sleep waiting for a mutex it already owned --
+   permanent, silent self-deadlock, first hit on the first real per-loop
+   MAVLink send (the initial HEARTBEAT), matching "loop runs once, then
+   nothing" exactly. */
 #if !defined(CH_CFG_USE_MUTEXES_RECURSIVE)
-#define CH_CFG_USE_MUTEXES_RECURSIVE        FALSE
+#define CH_CFG_USE_MUTEXES_RECURSIVE        TRUE
 #endif
 
 /**
@@ -646,7 +657,7 @@
  *          @p panic_msg variable set to @p NULL.
  */
 #if !defined(CH_DBG_ENABLE_STACK_CHECK)
-#define CH_DBG_ENABLE_STACK_CHECK           FALSE
+#define CH_DBG_ENABLE_STACK_CHECK           TRUE
 #endif
 
 /**
