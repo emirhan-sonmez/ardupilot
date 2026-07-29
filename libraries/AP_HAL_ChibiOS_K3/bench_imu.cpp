@@ -245,48 +245,60 @@ bool imu_try_bringup()
         trace_printf("AP-K3: imu: WHO_AM_I=%x on first probe, resetting...\n", who);
     }
 
-    // Reset, then wake. The reset takes tens of milliseconds; reading back
-    // earlier returns whatever happened to be on the bus.
+    // Reset, then wait for the part to come back. Nothing read during the
+    // reset is trustworthy: the first version of this did a read-modify-
+    // write on PWR_MGMT_1 immediately afterwards and got WHO_AM_I=0x0f out
+    // the other side, because whatever garbage the read returned went
+    // straight back into the register (RESET is a bit in that same
+    // register, so a bad read can re-trigger the reset indefinitely).
+    //
+    // So: no read-modify-write anywhere in bring-up. Every write below is a
+    // constant, and the part has to prove it is alive by answering WHO_AM_I
+    // before any of them happen.
     spi_write(REG_PWR_MGMT_1, BIT_RESET);
     chThdSleepMilliseconds(100);
 
     current_bank = -1;
-    set_bank(0);
-    spi_write(REG_PWR_MGMT_1, (uint8_t)(read_reg(REG_PWR_MGMT_1) & ~BIT_SLEEP));
-    chThdSleepMilliseconds(20);
-
-    // The part auto-detects its host interface and the reset cleared that
-    // choice. Pin it to SPI before anything else: until the I2C slave
-    // interface is disabled, bus noise can re-select it.
-    spi_write(REG_USER_CTRL, (uint8_t)(read_reg(REG_USER_CTRL) | BIT_I2C_IF_DIS));
-
-    // Re-read after the reset: this is what proves the part survived it and
-    // is still talking, not just that something answered once.
-    who = read_reg(REG_WHO_AM_I);
+    who = 0;
+    for (uint8_t i = 0; i < 20; i++) {
+        set_bank(0);
+        who = read_reg(REG_WHO_AM_I);
+        if (who == WHO_AM_I_VAL) {
+            break;
+        }
+        chThdSleepMilliseconds(10);
+    }
     if (who != WHO_AM_I_VAL) {
-        trace_printf("AP-K3: imu: WHO_AM_I=%x after reset, expected %x, retrying\n",
+        trace_printf("AP-K3: imu: WHO_AM_I=%x 200ms after reset, expected %x, retrying\n",
                      who, WHO_AM_I_VAL);
         return false;
     }
+
+    // Wake with auto clock select (PLL if available, internal otherwise) --
+    // the value ArduPilot's own Invensensev2 driver writes here. Bit 6
+    // (SLEEP) clear is what actually starts the sensors.
+    spi_write(REG_PWR_MGMT_1, 0x01);
+    chThdSleepMilliseconds(20);
+
+    // The part auto-detects its host interface and the reset cleared that
+    // choice. Pin it to SPI: until the I2C slave interface is disabled, bus
+    // noise can re-select it.
+    spi_write(REG_USER_CTRL, BIT_I2C_IF_DIS);
     trace_printf("AP-K3: imu: WHO_AM_I=%x OK on CS%u after %u attempt(s)\n",
                  who, SPI_CS_CHANNEL, attempts);
 
-    // Filters first, ranges second: they share a register, and the range
-    // writes preserve the filter bits rather than the other way round.
+    // GYRO_CONFIG_1 / ACCEL_CONFIG both pack DLPFCFG at bits 5:3, FS_SEL at
+    // bits 2:1 and FCHOICE (filter in circuit) at bit 0. The Linux example
+    // read-modify-writes these in two passes; here they are single constant
+    // writes for the same reason as above -- every reserved bit in both
+    // registers resets to 0, so there is nothing worth preserving, and a
+    // bad read cannot corrupt the result.
     set_bank(2);
 
-    // DLPFCFG is bits 5:3 and bit 0 puts the filter in circuit; 0xC6 keeps
-    // everything else in the register.
-    spi_write(REG_GYRO_CONFIG_1,
-              (uint8_t)((read_reg(REG_GYRO_CONFIG_1) & 0xC6) | (CFG_DLPF << 3) | 0x01));
-    spi_write(REG_ACCEL_CONFIG,
-              (uint8_t)((read_reg(REG_ACCEL_CONFIG) & 0xC6) | (CFG_DLPF << 3) | 0x01));
-
-    // FS_SEL is bits 2:1 in both registers.
-    spi_write(REG_GYRO_CONFIG_1,
-              (uint8_t)((read_reg(REG_GYRO_CONFIG_1) & ~0x06) | (CFG_GYRO_FS << 1)));
-    spi_write(REG_ACCEL_CONFIG,
-              (uint8_t)((read_reg(REG_ACCEL_CONFIG) & ~0x06) | (CFG_ACCEL_FS << 1)));
+    const uint8_t gyro_cfg  = (uint8_t)((CFG_DLPF << 3) | (CFG_GYRO_FS << 1) | 0x01);
+    const uint8_t accel_cfg = (uint8_t)((CFG_DLPF << 3) | (CFG_ACCEL_FS << 1) | 0x01);
+    spi_write(REG_GYRO_CONFIG_1, gyro_cfg);
+    spi_write(REG_ACCEL_CONFIG, accel_cfg);
 
     spi_write(REG_GYRO_SMPLRT_DIV, CFG_SMPLRT_DIV);
     // The accelerometer divider is 12 bits across two registers.
@@ -295,7 +307,23 @@ bool imu_try_bringup()
     // Start both sample clocks together so the samples stay in step.
     spi_write(REG_ODR_ALIGN_EN, 0x01);
 
+    // Read the two config registers back. A write that does not stick is
+    // the failure mode that otherwise shows up much later as data with
+    // plausible shape and wrong scale.
+    const uint8_t gyro_rb  = read_reg(REG_GYRO_CONFIG_1);
+    const uint8_t accel_rb = read_reg(REG_ACCEL_CONFIG);
+
     set_bank(0);
+
+    if (gyro_rb != gyro_cfg || accel_rb != accel_cfg) {
+        trace_printf("AP-K3: imu: config readback mismatch gyro=%x/%x accel=%x/%x, retrying\n",
+                     gyro_rb, gyro_cfg, accel_rb, accel_cfg);
+        return false;
+    }
+    if (xfer_failed) {
+        trace_printf("AP-K3: imu: a transfer timed out during configuration, retrying\n");
+        return false;
+    }
     return true;
 }
 
