@@ -84,13 +84,25 @@ constexpr float GYRO_SENSITIVITY   = 131.0f;    // LSB/(deg/s) at +/-250dps
 constexpr uint8_t  SPI_CS_CHANNEL  = 3;      // CS3 = ICM-20948 (CS1 = baro)
 
 /*
-  Bus rate: 1 MHz, settled by measurement rather than by the datasheet.
+  Bus rate: 250 kHz, settled by measurement rather than by the datasheet.
 
   bus_check() (below) reads WHO_AM_I 32 times and counts correct answers.
   On hardware:
 
-      1 MHz    32/32     clean
       4 MHz     0/32     every single read wrong
+      1 MHz    32/32     clean for single-byte reads -- but multi-byte
+                          transactions (a register address byte followed by
+                          one or more data/dummy bytes in the same CS
+                          assertion) corrupted individual bits past the
+                          first byte, non-deterministically: the same
+                          write/read pair returned different partial values
+                          across attempts (Open Questions Q-33). Config
+                          writes to the IMU are always multi-byte (address +
+                          value), so this silently broke every write while
+                          single-register reads kept looking clean.
+    250 kHz    32/32     clean, including multi-byte config writes and the
+                          14-byte accel/gyro/temp burst read -- confirmed on
+                          hardware, stable readings over many samples.
 
   4 MHz is what the Linux hwdef lists as this part's low-speed rate, and it
   is what this module used for its first three hardware runs -- which is
@@ -98,15 +110,18 @@ constexpr uint8_t  SPI_CS_CHANNEL  = 3;      // CS3 = ICM-20948 (CS1 = baro)
   and why WHO_AM_I itself intermittently returned garbage. Linux reaches
   4 MHz with a kernel driver doing DMA and hardware-timed chip select; this
   is a polled register loop, which is not the same electrical duty cycle.
-  1 MHz is also what the NuttX AM67 port uses for these parts on this
-  controller, so it is not an arbitrary retreat.
+  1 MHz is what the NuttX AM67 port uses for these parts on this controller,
+  but that reference never issues a multi-byte write over this bus, only
+  single-word transfers -- so the 1 MHz choice never exercised the failure
+  mode found here. Root cause is bus-timing/signal margin at 1 MHz on this
+  board's CS3 wiring, not a driver logic bug (see Decision Log).
 
   Driving the IMU enable line made no measurable difference: 32/32 either
   way, and identical write behaviour. It is still asserted, because NuttX's
   board table says it is what activates the part and there is no cost to
   being right about it, but it is not load-bearing for the bus working.
 */
-constexpr uint32_t SPI_SPEED_HZ = 1000000;
+constexpr uint32_t SPI_SPEED_HZ = 250000;
 
 constexpr uint32_t SAMPLE_INTERVAL_MS = 20;   // 50 Hz read
 constexpr uint32_t REPORT_INTERVAL_MS = 1000; // 1 Hz trace line
