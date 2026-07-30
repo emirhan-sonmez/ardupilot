@@ -155,6 +155,20 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
     }
     trace_printf("AP-K3: 6 RCOutput channels safe-initialized at 1000us\n");
 
+    /* Q-34 root-cause fix: hand the PWM channels to bench_passthrough
+       exclusively, from here on. Set AFTER the safe-init above (which uses the
+       ordinary write() path and must still be allowed through) and BEFORE
+       callbacks->setup(), so ArduCopter's AP_Motors init-time writes are
+       blocked too, not just its per-tick ones.
+
+       DR-012's "bench_passthrough runs last every tick" was not enough and
+       could never be: CMPA/CMPB load from shadow at CTR=ZERO, once per 20ms
+       period, at a phase unrelated to the main loop, so the pin takes
+       whichever writer touched the shadow last before that load -- not
+       whichever ran last in the iteration. See RCOutput.h,
+       set_exclusive_mask(). */
+    rcoutDriver.set_exclusive_mask(ChibiOS_K3::PT_EXCLUSIVE_MASK);
+
     // Bench ICM-20948 bring-up on MCU_MCSPI0 CS3. Before setup(), so a
     // wrong chip select or a bus Linux still owns shows up as its own trace
     // line rather than being lost among the vehicle's own init output.
@@ -245,8 +259,15 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
         const uint32_t now_ms = AP_HAL::millis();
         if (now_ms - last_report_ms >= 5000) {
             last_report_ms = now_ms;
-            trace_printf("AP-K3: alive t=%ums loops=%u txq=%u stackhw=%u/%u uart[notify=%u isr=%u thre=%u fifo=%u deq=%u thr=%u]\n",
+            /* pwmblk= (Q-34): RCOutput writes rejected by the exclusive mask,
+               i.e. AP_Motors/SRV_Channels attempts to drive the motor pins.
+               Climbing at roughly loop rate x 6 is the direct proof that a
+               second writer really was competing for these outputs; frozen at
+               0 while the scope still dances would mean the competing writer
+               is something else and this fix is aimed wrong. */
+            trace_printf("AP-K3: alive t=%ums loops=%u txq=%u pwmblk=%u stackhw=%u/%u uart[notify=%u isr=%u thre=%u fifo=%u deq=%u thr=%u]\n",
                          now_ms, loops, tx_queued,
+                         rcoutDriver.foreign_writes_blocked(),
                          stack_paint_highwater(), stack_paint_total(),
                          am67_uart1_notify_count, am67_uart1_isr_count,
                          am67_uart1_thre_count, am67_uart1_load_fifo_count,

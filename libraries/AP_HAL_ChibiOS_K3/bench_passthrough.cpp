@@ -3,9 +3,10 @@
 #if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
 
 #include "bench_passthrough.h"
+#include "RCOutput.h"           // ChibiOS_K3::RCOutput::write_exclusive()
 #include <AP_RCProtocol/AP_RCProtocol.h>
 #include <hal.h>                // AM67_EPWM0_BASE (board.h)
-#include <am67_epwm.h>          // ehrpwm_read_cmp, for the hardware readback proof
+#include <am67_epwm.h>          // ehrpwm_read_cmp (shadow readback, diagnostics only)
 #include "hwdef/boot/trace.h"
 
 extern const AP_HAL::HAL& hal;
@@ -119,11 +120,15 @@ int32_t last_thr = -1000, last_roll = -1000, last_pitch = -1000, last_yaw = -100
 uint16_t motor_us[PT_NUM_MOTORS] = { PT_IDLE_US, PT_IDLE_US, PT_IDLE_US, PT_IDLE_US };
 uint16_t g_ch[IB_MIN_CHANNELS] = { 1500, 1500, 1000, 1500, 1000 };
 
+// Q-34: writes must go through the owner-only path, otherwise the exclusive
+// mask set in HAL_ChibiOS_K3::run() would drop this module's own writes too.
+// hal.rcout is always the ChibiOS_K3::RCOutput instance on this board (see
+// HAL_ChibiOS_K3_Class.cpp) -- there is no other backend to be.
 void pt_set(uint8_t out, uint16_t us)
 {
     if (us < PT_MIN_US) { us = PT_MIN_US; }
     if (us > PT_MAX_US) { us = PT_MAX_US; }
-    hal.rcout->write(out, us);
+    static_cast<ChibiOS_K3::RCOutput *>(hal.rcout)->write_exclusive(out, us);
 }
 
 void pt_all_idle()
@@ -284,7 +289,7 @@ void bench_passthrough_update()
                     pt_set(pt_motor[m].out, (uint16_t)us);
                 }
             }
-            // out4/out5 stay at idle -- the pusher motor is out of scope.
+            // out4/out5 are held at idle unconditionally below.
         } else {
             for (uint8_t m = 0; m < PT_NUM_MOTORS; m++) {
                 motor_us[m] = PT_IDLE_US;
@@ -304,21 +309,24 @@ void bench_passthrough_update()
     }
 
     // Unconditionally re-assert motor_us[] to hardware every call, not just
-    // when new_input() was true above. Unlike the ChibiOS demo this was
-    // ported from, ArduPilot's own vehicle code (Plane::set_servos(), an
-    // AP_Scheduler fast task) also writes RCOutput channels 0-3 every tick
-    // even with SERVOn_FUNCTION unconfigured -- observed on hardware as
-    // ch0/ch2 settling at 1500/1100us instead of this passthrough's idle
-    // value. Holding idle (or the armed mix) against that competing writer
-    // means continuously re-commanding it, not just computing it once when
-    // fresh RC data happens to arrive; with no receiver connected chans=0
-    // and new_input() is never true, so this was previously a silent no-op
-    // -- outputs were never actually idle-held at all. This call must stay
-    // last in the function, after every branch above that can change
-    // motor_us[].
+    // when new_input() was true above: with no receiver connected chans=0 and
+    // the block above never runs, so without this the outputs would never
+    // actually be idle-held at all. Must stay last in the function, after
+    // every branch that can change motor_us[].
+    //
+    // This is no longer how the write conflict with the vehicle's own output
+    // path is won -- PT_EXCLUSIVE_MASK does that in the HAL, and re-asserting
+    // every tick cannot (Q-34: the losing writer only has to touch the shadow
+    // register at the wrong moment within a 20ms PWM period, not last within
+    // the loop iteration; see RCOutput.h set_exclusive_mask()).
     for (uint8_t m = 0; m < PT_NUM_MOTORS; m++) {
         pt_set(pt_motor[m].out, motor_us[m]);
     }
+    // ch4/ch5 have no function this milestone (the pusher motor is out of
+    // scope) but SRV_Channels::push() writes them every tick too, so they are
+    // held explicitly at idle rather than left to whatever wrote last.
+    pt_set(4, PT_IDLE_US);
+    pt_set(5, PT_IDLE_US);
 
     // Change-triggered logging plus a slow heartbeat -- the RemoteProc trace
     // buffer is 16 KiB and does not wrap (trace.c stops accepting once full).
@@ -347,11 +355,19 @@ void bench_passthrough_update()
     last_pitch  = (int32_t)g_ch[IB_PITCH];
     last_yaw    = (int32_t)g_ch[IB_YAW];
 
-    // cmp is read straight back from the EPWM0 hardware, not echoed, so it
-    // proves the pin 29 waveform really moved: at the 3.125 MHz TBCLK,
-    // 1000us -> 3125, 1500us -> 4687, 2000us -> 6250, tbprd 62500 throughout.
+    // cmpa_shadow is EPWM0's CMPA *shadow* register, read back from hardware.
+    // Scale, at the 3.125 MHz TBCLK: 1000us -> 3125, 1500us -> 4687,
+    // 2000us -> 6250, tbprd 62500 throughout.
+    //
+    // Read this as "our last write landed", NOT as "the pin is doing this".
+    // CMPA is in shadow mode (load at CTR=ZERO) and a read of the CMPA address
+    // returns the shadow, so this value cannot disagree with what this function
+    // just wrote a few lines above -- which is exactly why a whole session of
+    // "registers always read correct" never caught Q-34's competing writer.
+    // blocked= is the useful number now: RCOutput drops of foreign writes,
+    // reported in HAL_ChibiOS_K3::run()'s 5s alive line.
     trace_printf("pt: %s thr=%u | m1=%u m2=%u m3=%u m4=%u | r=%u p=%u y=%u | "
-                 "cmp=%u chans=%u\n",
+                 "cmpa_shadow=%u chans=%u\n",
                  armed ? "ARMED " : (arm_gate_ok ? "disarm/rdy" : "disarm/cyc"),
                  (uint32_t)g_ch[IB_THR],
                  (uint32_t)motor_us[0], (uint32_t)motor_us[1],

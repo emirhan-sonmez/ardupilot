@@ -68,9 +68,34 @@ void RCOutput::set_freq(uint32_t chmask, uint16_t freq_hz)
                      (uint32_t)freq_hz, (uint32_t)RCOUTPUT_VERIFIED_FREQ_HZ);
         freq_hz = RCOUTPUT_VERIFIED_FREQ_HZ;
     }
+    /*
+      Idempotence guard, 2026-07-30. Re-running ehrpwm_start()/ecap_start() on a
+      peripheral already at this frequency is destructive, not free:
+
+        - ehrpwm_start() writes TBCTR = 0. Resetting the counter part-way
+          through a period stretches or truncates that one period while the
+          pulse width stays put, so the measured duty jumps for a cycle. A
+          reset landing just after the CMPA match roughly doubles the period
+          -> ~5-7% measured where 10% was commanded.
+        - ecap_start() writes CAP2 = 0, i.e. drops the active compare to 0%
+          duty immediately, until the shadow reloads at the next boundary.
+
+      Observed on hardware this way: ch3's active compare went 125000 -> 0
+      across bench_passthrough's own set_freq(0x3F, 50) call, which is a no-op
+      by intent. Note the frequency clamp above runs first, so even a *refused*
+      request (AP_Motors asks for 400 then 490 during setup) reached this loop
+      and glitched all six pins. Nothing above this driver should be able to
+      disturb a running output by asking for the frequency it already has.
+    */
+    if (freq_hz == _freq_hz) {
+        return;
+    }
+
     _freq_hz = freq_hz;
-    // Re-program the time base of any already-started peripheral referenced by
-    // the mask.
+    // Genuine frequency change: re-program the time base of any already-started
+    // peripheral referenced by the mask, then restore that channel's commanded
+    // pulse width -- the restart above resets the compare registers, and the
+    // caller is entitled to assume set_freq() does not silently change duty.
     for (uint8_t ch = 0; ch < NUM_CH; ch++) {
         if ((chmask & (1U << ch)) == 0) {
             continue;
@@ -81,6 +106,9 @@ void RCOutput::set_freq(uint32_t chmask, uint16_t freq_hz)
                 ecap_start(PERIPH[p].base, _freq_hz);
             } else {
                 ehrpwm_start(PERIPH[p].base, _freq_hz);
+            }
+            if (_ch_enabled[ch]) {
+                hw_set(ch, _pulse_us[ch]);
             }
         }
     }
@@ -232,11 +260,40 @@ void RCOutput::disable_ch(uint8_t chan)
     }
 }
 
+void RCOutput::set_exclusive_mask(uint32_t mask)
+{
+    _exclusive_mask = mask;
+    trace_printf("rcout: exclusive mask=0x%x (write() from other modules now dropped)\n",
+                 (uint32_t)mask);
+}
+
 void RCOutput::write(uint8_t chan, uint16_t period_us)
 {
     if (chan >= NUM_CH) {
         return;
     }
+    // Q-34: an exclusively-owned channel drops foreign writes outright --
+    // including the _pulse_us[] cache, so read() keeps reporting the owner's
+    // real commanded value rather than what the loser asked for. See the
+    // set_exclusive_mask() comment in RCOutput.h for why ordering cannot
+    // substitute for this.
+    if ((_exclusive_mask & (1U << chan)) != 0) {
+        _foreign_blocked++;
+        return;
+    }
+    hw_write(chan, period_us);
+}
+
+void RCOutput::write_exclusive(uint8_t chan, uint16_t period_us)
+{
+    if (chan >= NUM_CH) {
+        return;
+    }
+    hw_write(chan, period_us);
+}
+
+void RCOutput::hw_write(uint8_t chan, uint16_t period_us)
+{
     if (period_us < PWM_MIN_US) { period_us = PWM_MIN_US; }
     if (period_us > PWM_MAX_US) { period_us = PWM_MAX_US; }
     _pulse_us[chan] = period_us;
@@ -268,7 +325,12 @@ void RCOutput::write(uint8_t chan, uint16_t period_us)
                      (uint32_t)ecap_read_compare(PERIPH[c.periph].base),
                      (uint32_t)ecap_read_period(PERIPH[c.periph].base));
     } else {
-        trace_printf("rcout: ch%u=%u us EPWM cmp=%u tbprd=%u\n",
+        // cmpa_shadow, not the active compare: CMPCTL keeps CMPA/CMPB in
+        // shadow mode (load at CTR=ZERO) and a read of the CMPA/CMPB address
+        // returns the shadow. Classic eHRPWM exposes no separate active-compare
+        // address, so this readback can only ever confirm our own last write --
+        // it cannot prove what the pin is doing. Do not treat it as pin proof.
+        trace_printf("rcout: ch%u=%u us EPWM cmpa_shadow=%u tbprd=%u\n",
                      (uint32_t)chan, (uint32_t)period_us,
                      (uint32_t)ehrpwm_read_cmp(PERIPH[c.periph].base, c.output_b),
                      (uint32_t)ehrpwm_read_tbprd(PERIPH[c.periph].base));
