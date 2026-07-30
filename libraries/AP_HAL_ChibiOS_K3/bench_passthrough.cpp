@@ -62,10 +62,22 @@ constexpr uint32_t PT_FAILSAFE_MS     = 200;    // no valid frame for this -> id
 // for the first-ever powered-ESC test. Cuts (failsafe, disarm, stick pulled
 // down) stay instant; only the climb toward higher throttle is smoothed, so
 // a fast stick movement right after arming can't snap a motor from idle to
-// max in one ~7.7ms iBus frame. 333 us/s means idle(1000)->max(2000) takes
-// ~3s -- conservative on purpose, retune once this has been seen on the
-// bench.
-constexpr uint16_t PT_RAMP_US_PER_SEC = 333;
+// max in one ~7.7ms iBus frame.
+//
+// DISABLED 2026-07-30 (PT_RAMP_ENABLED 0): retuned 333 -> 600 us/s (~3s -> ~1.7s
+// for a full 1000->2000 stroke) and the throttle response was still judged too
+// slow to work with on the bench, so the limiter is off and the commanded value
+// is applied instantly. Rate authority moves to ArduCopter's own mixer/PID once
+// QGroundControl parameter configuration exists; this limiter was only ever a
+// stand-in for that, for the first powered-ESC test. Re-enable by setting
+// PT_RAMP_ENABLED to 1 -- the rate below is kept tuned and ready.
+//
+// Consequence while disabled: a full stick slam steps a motor from idle to max
+// in a single tick, with nothing between the receiver and the ESC. The arm
+// interlocks and the instant-cut paths (disarm, RC failsafe, frame timeout) are
+// unaffected -- they never went through the limiter.
+#define PT_RAMP_ENABLED 0
+constexpr uint16_t PT_RAMP_US_PER_SEC = 600;
 
 // Debounce for the throttle-idle gate, 2026-07-30: a single bad iBus frame
 // occasionally decoded throttle below PT_THR_MIN_GATE_US even while the
@@ -277,9 +289,10 @@ void bench_passthrough_update()
 
                     // Climb-only slew limit -- see PT_RAMP_US_PER_SEC above.
                     // A drop in target (stick pulled back) is applied
-                    // instantly; only a rise is capped per tick.
+                    // instantly; only a rise is capped per tick. With
+                    // PT_RAMP_ENABLED 0 the rise is instant too.
                     int32_t us = (int32_t)motor_us[m];
-                    if (target > us) {
+                    if (PT_RAMP_ENABLED && (target > us)) {
                         const int32_t remaining = target - us;
                         us += (ramp_max_step < remaining) ? ramp_max_step : remaining;
                     } else {
