@@ -23,6 +23,7 @@
 #include "UARTDriver.h"
 #include "RCOutput.h"
 #include "RCInput.h"
+#include "SPIDevice.h"
 #include "bench_passthrough.h"
 #include "bench_imu.h"
 #include <AP_RCProtocol/AP_RCProtocol.h>   // AP::RC(), for the rc health line
@@ -57,7 +58,7 @@ static Empty::UARTDriver serial7Driver;
 static Empty::UARTDriver serial8Driver;
 static Empty::UARTDriver serial9Driver;
 static Empty::I2CDeviceManager i2cDeviceManager;
-static Empty::SPIDeviceManager spiDeviceManager;
+static ChibiOS_K3::SPIDeviceManager spiDeviceManager;
 static Empty::WSPIDeviceManager wspiDeviceManager;
 static Empty::AnalogIn analogIn;
 static Empty::Storage storageDriver;
@@ -175,6 +176,13 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
     // line rather than being lost among the vehicle's own init output.
     // Reports and returns on failure -- never blocks the boot.
     ChibiOS_K3::bench_imu_init();
+
+    /* Prove the AP_HAL SPI path independently of bench_imu.cpp's direct SPID1
+       access, before AP_InertialSensor is given anything that depends on it.
+       Runs after bench_imu_init() so the two cannot be confused for each other
+       in the trace, and so a failure here against a bench_imu success points
+       squarely at this layer rather than at the bus. */
+    spiDeviceManager.selftest();
 
     trace_printf("AP-K3: entering vehicle setup()\n");
     callbacks->setup();

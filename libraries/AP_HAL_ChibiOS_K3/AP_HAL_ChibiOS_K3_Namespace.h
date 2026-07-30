@@ -23,4 +23,8 @@ namespace ChibiOS_K3 {
     class UARTDriver;
     class RCOutput;
     class RCInput;
+    struct SPIDeviceDesc;
+    class SPIBus;
+    class SPIDevice;
+    class SPIDeviceManager;
 }
