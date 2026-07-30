@@ -17,13 +17,12 @@ extern const AP_HAL::HAL& hal;
   iBus decode itself is not reimplemented -- ChibiOS_K3::RCInput already
   feeds AP_RCProtocol, this just reads the decoded channels back out.
 
-  Deliberately independent of ArduPilot's own vehicle/scheduler/QuadPlane/
-  SRV_Channels path: QuadPlane mixer configuration is explicitly out of
-  scope for this milestone (Empty::Storage cannot persist SERVOn_FUNCTION/
-  Q_FRAME_* parameters -- see the ArduPilot iBus Port Handoff note, section
-  4c). This is NOT a flight controller: no attitude stabilisation, no
-  vehicle arming/failsafe logic beyond what's implemented below. Do not fly
-  this.
+  Deliberately independent of ArduPilot's own vehicle/scheduler/AP_Motors/
+  SRV_Channels path: the real motor mixer is explicitly out of scope for
+  this milestone (Empty::Storage cannot persist SERVOn_FUNCTION/
+  FRAME_CLASS/FRAME_TYPE parameters). This is NOT a flight controller: no
+  attitude stabilisation, no vehicle arming/failsafe logic beyond what's
+  implemented below. Do not fly this.
 
   SAFETY, all mandatory:
     - PROPELLERS OFF.

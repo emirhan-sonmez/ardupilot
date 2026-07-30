@@ -139,10 +139,11 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
 
     /* PWM safety (M2): SERVOx_FUNCTION defaults to disabled and Storage is
        Empty:: (nothing persists), so SRV_Channels will not touch any output
-       on its own this milestone -- QuadPlane motor/servo assignment is out
-       of scope here. Explicitly set every real RCOutput channel to a safe
-       1000 us idle and enable it, once, before vehicle setup(). No arming,
-       no cycling, no 7th channel (EHRPWM0_B/pin 8 stays untouched). */
+       on its own this milestone -- real motor/servo assignment (FRAME_CLASS/
+       FRAME_TYPE) is out of scope here. Explicitly set every real RCOutput
+       channel to a safe 1000 us idle and enable it, once, before vehicle
+       setup(). No arming, no cycling, no 7th channel (EHRPWM0_B/pin 8 stays
+       untouched). */
     for (uint8_t ch = 0; ch < 6; ch++) {
         rcout->write(ch, 1000);
     }
@@ -208,16 +209,20 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
         // Bench RC->PWM passthrough for the four quad-X outputs (task 4,
         // stretch). Independent of the vehicle's own loop -- see
         // bench_passthrough.cpp for scope and safety notes. Deliberately
-        // AFTER callbacks->loop(): Plane's own SRV_Channels output
-        // (Plane::set_servos(), an AP_Scheduler fast task) also writes
+        // AFTER callbacks->loop(): under ArduPlane, Plane's own SRV_Channels
+        // output (Plane::set_servos(), an AP_Scheduler fast task) wrote
         // channels 0-3 every tick even with SERVOn_FUNCTION unconfigured
         // (observed on hardware: ch0/ch2 came up at 1500/1100us, not this
-        // passthrough's 1000us idle, while it ran first) -- QuadPlane mixer
-        // configuration is explicitly out of scope for this milestone (see
-        // the ArduPilot iBus Port Handoff, section 4c), so rather than
-        // configure SRV_Channels to leave these outputs alone, this runs
-        // last and unconditionally overwrites them with the arm-gated
-        // value every tick. PROPELLERS OFF.
+        // passthrough's 1000us idle, while it ran first). Switched to
+        // ArduCopter 2026-07-30 -- expect the same or a stronger conflict
+        // from Copter's own AP_Motors output, since FRAME_CLASS/FRAME_TYPE
+        // default to an active quad-X mixer rather than an opt-in
+        // SRV_Channels function; not yet re-verified on hardware under
+        // Copter. Real motor mixer configuration remains out of scope for
+        // this milestone, so rather than configure the vehicle to leave
+        // these outputs alone, this runs last and unconditionally
+        // overwrites them with the arm-gated value every tick. PROPELLERS
+        // OFF.
         ChibiOS_K3::bench_passthrough_update();
 
         // Sensor read-out, rate-limited internally (50 Hz sample, 1 Hz
