@@ -38,10 +38,35 @@ void RCOutput::init()
     trace_printf("rcout: init (6 channels)\n");
 }
 
+/*
+  Root-cause fix, 2026-07-30: the only frequency ever hardware-verified on
+  this board is 50 Hz (the traditional RC PWM rate every scope check, the
+  bench passthrough's cmp<->us math, and standard analog ESCs all assume).
+  ArduCopter's own AP_Motors/RC_SPEED init calls set_freq() during
+  callbacks->setup() with an ESC-oriented rate (observed on hardware as
+  400 Hz) -- a rate this port has never proven correct. Previously this
+  was "fixed" after the fact from bench_passthrough.cpp's first tick, which
+  left a real window (the whole of setup(), several seconds) where the
+  physical pins carried the wrong frequency before anything corrected it.
+  That is not acceptable on pins that may have a live ESC.
+
+  Fix moved here instead: refuse any request that is not the
+  hardware-verified rate. Nothing above this driver is trusted with
+  frequency until a rate other than 50 Hz has actually been scope-verified
+  on this hardware -- at that point, raise RCOUTPUT_VERIFIED_FREQ_HZ (and
+  update this comment), do not just delete the check.
+*/
+constexpr uint16_t RCOUTPUT_VERIFIED_FREQ_HZ = 50;
+
 void RCOutput::set_freq(uint32_t chmask, uint16_t freq_hz)
 {
     if (freq_hz == 0) {
         return;
+    }
+    if (freq_hz != RCOUTPUT_VERIFIED_FREQ_HZ) {
+        trace_printf("rcout: set_freq(%u) refused, only %u Hz is hardware-verified on this board\n",
+                     (uint32_t)freq_hz, (uint32_t)RCOUTPUT_VERIFIED_FREQ_HZ);
+        freq_hz = RCOUTPUT_VERIFIED_FREQ_HZ;
     }
     _freq_hz = freq_hz;
     // Re-program the time base of any already-started peripheral referenced by
@@ -125,6 +150,19 @@ void RCOutput::retry_pending()
     for (uint8_t chan = 0; chan < NUM_CH; chan++) {
         if (!_ch_enabled[chan]) {
             enable_ch(chan);
+        }
+    }
+}
+
+void RCOutput::reassert_outputs()
+{
+    for (uint8_t chan = 0; chan < NUM_CH; chan++) {
+        if (!_ch_enabled[chan]) {
+            continue;
+        }
+        const chan_desc &c = CHAN[chan];
+        if (!PERIPH[c.periph].is_ecap) {
+            ehrpwm_out_reassert(PERIPH[c.periph].base, c.output_b);
         }
     }
 }

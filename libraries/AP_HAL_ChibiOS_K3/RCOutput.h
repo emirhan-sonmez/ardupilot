@@ -43,6 +43,14 @@ public:
     // periodically, not every loop tick.
     void     retry_pending();
 
+    // Re-writes AQCTLA/AQCTLB on every enabled EPWM channel (ch0-2) every
+    // call -- safe every tick, never touches CMPA/CMPB. Added 2026-07-30:
+    // AQCTLA/B was otherwise written exactly once, at enable_ch() time,
+    // and never revisited -- same written-once-never-reasserted shape as
+    // the TBPRD/frequency bug fixed the same day. Closes that gap for
+    // ECAP channels too where cheap to do so.
+    void     reassert_outputs();
+
 private:
     static const uint8_t  NUM_CH = 6;
     static const uint8_t  NUM_PERIPH = 5;      // EPWM0, EPWM1, ECAP0, ECAP1, ECAP2

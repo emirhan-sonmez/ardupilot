@@ -126,6 +126,21 @@ constexpr uint32_t SPI_SPEED_HZ = 250000;
 constexpr uint32_t SAMPLE_INTERVAL_MS = 20;   // 50 Hz read
 constexpr uint32_t REPORT_INTERVAL_MS = 1000; // 1 Hz trace line
 
+/*
+  Runtime sample sanity check. Even at 250 kHz (DR-013), corruption has
+  been observed to resume mid-run, not just at bring-up -- every corrupted
+  sample seen on hardware (2026-07-30, ArduCopter session) showed at least
+  one gyro axis in the tens of thousands of mdps on a bench-mounted, still
+  board; every genuine sample stayed under ~1000 mdps. 5000 is a wide
+  margin on both sides of that observed split, not a guess.
+
+  Without this, a bad SPI burst was silently reported as real data forever
+  -- imu_present never went back to false, so nothing ever re-validated
+  the bus once initial bring-up succeeded once.
+*/
+constexpr int32_t IMU_GYRO_SANITY_MDPS = 5000;
+constexpr uint8_t IMU_BAD_SAMPLES_TO_RESYNC = 3;
+
 // The trace buffer is 16 KiB and does not wrap, so one line per second is
 // about three minutes of visibility. Raise REPORT_INTERVAL_MS if a longer
 // run matters more than resolution.
@@ -503,6 +518,7 @@ void ChibiOS_K3::bench_imu_update()
     static uint32_t last_sample_ms;
     static uint32_t last_report_ms;
     static uint32_t last_retry_ms;
+    static uint8_t bad_samples;
     static int16_t ax, ay, az, gx, gy, gz, temp_raw;
 
     const uint32_t now_ms = AP_HAL::millis();
@@ -530,6 +546,7 @@ void ChibiOS_K3::bench_imu_update()
 
     // ACCEL_OUT..TEMP_OUT is one contiguous block: 6 accel + 6 gyro + 2 temp.
     uint8_t raw[14];
+    xfer_failed = false;
     set_bank(0);
     spi_read(REG_ACCEL_OUT, raw, sizeof(raw));
 
@@ -540,6 +557,34 @@ void ChibiOS_K3::bench_imu_update()
     gy = (int16_t)((uint16_t)raw[8]  << 8 | raw[9]);
     gz = (int16_t)((uint16_t)raw[10] << 8 | raw[11]);
     temp_raw = (int16_t)((uint16_t)raw[12] << 8 | raw[13]);
+
+    const int32_t gx_mdps = (int32_t)((float)gx * 1000.0f / GYRO_SENSITIVITY);
+    const int32_t gy_mdps = (int32_t)((float)gy * 1000.0f / GYRO_SENSITIVITY);
+    const int32_t gz_mdps = (int32_t)((float)gz * 1000.0f / GYRO_SENSITIVITY);
+
+    const bool implausible = xfer_failed ||
+        (gx_mdps > IMU_GYRO_SANITY_MDPS) || (gx_mdps < -IMU_GYRO_SANITY_MDPS) ||
+        (gy_mdps > IMU_GYRO_SANITY_MDPS) || (gy_mdps < -IMU_GYRO_SANITY_MDPS) ||
+        (gz_mdps > IMU_GYRO_SANITY_MDPS) || (gz_mdps < -IMU_GYRO_SANITY_MDPS);
+
+    if (implausible) {
+        bad_samples++;
+        trace_printf("AP-K3: imu: implausible sample (%u/%u) g=%d,%d,%d mdps, discarding\n",
+                     (uint32_t)bad_samples, (uint32_t)IMU_BAD_SAMPLES_TO_RESYNC,
+                     (int)gx_mdps, (int)gy_mdps, (int)gz_mdps);
+        if (bad_samples >= IMU_BAD_SAMPLES_TO_RESYNC) {
+            // Same escape hatch as a failed bring-up: force the next
+            // update() to re-validate the bus (bus_check, WHO_AM_I, full
+            // reconfigure) instead of continuing to trust a bus that has
+            // just proven itself unreliable.
+            trace_printf("AP-K3: imu: %u consecutive bad samples, forcing resync\n",
+                         (uint32_t)IMU_BAD_SAMPLES_TO_RESYNC);
+            imu_present = false;
+            bad_samples = 0;
+        }
+        return;
+    }
+    bad_samples = 0;
 
     if (now_ms - last_report_ms < REPORT_INTERVAL_MS) {
         return;
@@ -554,9 +599,6 @@ void ChibiOS_K3::bench_imu_update()
     const int32_t ax_mg = (int32_t)((float)ax * 1000.0f / ACCEL_SENSITIVITY);
     const int32_t ay_mg = (int32_t)((float)ay * 1000.0f / ACCEL_SENSITIVITY);
     const int32_t az_mg = (int32_t)((float)az * 1000.0f / ACCEL_SENSITIVITY);
-    const int32_t gx_mdps = (int32_t)((float)gx * 1000.0f / GYRO_SENSITIVITY);
-    const int32_t gy_mdps = (int32_t)((float)gy * 1000.0f / GYRO_SENSITIVITY);
-    const int32_t gz_mdps = (int32_t)((float)gz * 1000.0f / GYRO_SENSITIVITY);
     const int32_t temp_mc = (int32_t)(((float)temp_raw / 333.87f + 21.0f) * 1000.0f);
 
     trace_printf("AP-K3: imu a=%d,%d,%d mg g=%d,%d,%d mdps t=%d mC\n",

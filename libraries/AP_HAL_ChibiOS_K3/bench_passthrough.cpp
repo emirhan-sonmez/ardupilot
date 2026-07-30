@@ -56,6 +56,27 @@ constexpr uint16_t PT_THR_MIN_GATE_US = 1050;   // throttle must be under this t
 constexpr uint16_t PT_FS_THR_US       = 950;    // at/below this, transmitter link is gone
 constexpr uint32_t PT_FAILSAFE_MS     = 200;    // no valid frame for this -> idle
 
+// Slew-rate limit, climbing only -- not in the ChibiOS demo this file ports
+// (checked: main.c's GEMSTONE_IBUS_TEST block has no ramp logic either), new
+// for the first-ever powered-ESC test. Cuts (failsafe, disarm, stick pulled
+// down) stay instant; only the climb toward higher throttle is smoothed, so
+// a fast stick movement right after arming can't snap a motor from idle to
+// max in one ~7.7ms iBus frame. 333 us/s means idle(1000)->max(2000) takes
+// ~3s -- conservative on purpose, retune once this has been seen on the
+// bench.
+constexpr uint16_t PT_RAMP_US_PER_SEC = 333;
+
+// Debounce for the throttle-idle gate, 2026-07-30: a single bad iBus frame
+// occasionally decoded throttle below PT_THR_MIN_GATE_US even while the
+// stick was held at max, snapping all four motors to idle for one tick --
+// confirmed on hardware, not explained by mixing. Not in the ChibiOS demo
+// this file ports (checked -- no filtering there either), new. Costs a
+// ~2-tick (~13ms at this port's loop rate) delay before a genuine
+// throttle-down is honored; deliberately small, and only applies to this
+// specific gate -- everything else (RC failsafe, frame timeout) stays
+// instant.
+constexpr uint8_t PT_THR_LOW_DEBOUNCE_TICKS = 2;
+
 // iBus channel indices (0-based). Confirmed on hardware in the ChibiOS demo.
 constexpr uint8_t IB_ROLL  = 0;
 constexpr uint8_t IB_PITCH = 1;
@@ -92,6 +113,8 @@ bool arm_gate_ok;       // an unconsumed OFF->ON switch edge is available
 bool last_armed;
 uint32_t last_good_frame_ms;
 uint32_t last_report_ms;
+uint32_t last_ramp_ms;  // for the climb-only slew limiter, below
+uint8_t thr_low_count;  // consecutive ticks with throttle below the idle gate
 int32_t last_thr = -1000, last_roll = -1000, last_pitch = -1000, last_yaw = -1000;
 uint16_t motor_us[PT_NUM_MOTORS] = { PT_IDLE_US, PT_IDLE_US, PT_IDLE_US, PT_IDLE_US };
 uint16_t g_ch[IB_MIN_CHANNELS] = { 1500, 1500, 1000, 1500, 1000 };
@@ -123,9 +146,40 @@ void bench_passthrough_update()
         started = true;
         last_good_frame_ms = now_ms;
         last_report_ms = now_ms;
+        last_ramp_ms = now_ms;
+
+        // ArduCopter's own AP_Motors/RC_SPEED init calls
+        // hal.rcout->set_freq() during callbacks->loop()'s first pass
+        // through vehicle setup, with an ESC-oriented rate -- observed on
+        // hardware 2026-07-30 as 400 Hz, not the 50 Hz every us<->register
+        // calculation in this file assumes (see the tbprd=62500 comment
+        // below). ArduPlane's equivalent servo-output init used 50 Hz,
+        // which is why this was never visible before the vehicle switch:
+        // bench_passthrough never called set_freq() itself, it silently
+        // depended on whatever the vehicle's own init picked.
+        //
+        // set_freq() re-programs the timebase of any already-started
+        // peripheral (RCOutput.cpp:41-62), not just ones starting fresh,
+        // so this reliably wins regardless of init order -- same "runs
+        // last, unconditionally overwrites" principle as the motor_us[]
+        // reassertion below, extended to frequency. All 6 physical
+        // channels are forced, not just the 4 this module drives: the
+        // boot-time safe-init in HAL_ChibiOS_K3_Class.cpp starts all 6,
+        // and any of them could have something real connected.
+        hal.rcout->set_freq(0x3F, 50);
+        trace_printf("pt: forced RCOutput to 50 Hz (was whatever AP_Motors requested)\n");
+
         trace_printf("pt: DISARMED. To arm: throttle DOWN, arm switch OFF then ON. "
                      "PROPELLERS OFF.\n");
     }
+
+    // Time-based, not tick-count-based -- immune to main loop rate jitter.
+    // Computed once per call and reused below, whether or not the armed
+    // mixing branch actually runs this tick.
+    const uint32_t ramp_dt_ms = now_ms - last_ramp_ms;
+    last_ramp_ms = now_ms;
+    const int32_t ramp_max_step =
+        (int32_t)(((uint64_t)PT_RAMP_US_PER_SEC * ramp_dt_ms) / 1000U);
 
     // Deliberately NOT gated on AP::RC().new_input(): that flag is
     // consume-on-read (AP_RCProtocol::new_input() sets it false as soon as
@@ -186,14 +240,22 @@ void bench_passthrough_update()
 
         if (armed) {
             if (g_ch[IB_THR] < PT_THR_MIN_GATE_US) {
-                // Throttle idle: hold every motor at idle, no mixing --
-                // otherwise a stick alone could raise a motor above idle
-                // with the throttle closed.
-                for (uint8_t m = 0; m < PT_NUM_MOTORS; m++) {
-                    motor_us[m] = PT_IDLE_US;
-                    pt_set(pt_motor[m].out, PT_IDLE_US);
+                if (thr_low_count < 255) { thr_low_count++; }
+                if (thr_low_count >= PT_THR_LOW_DEBOUNCE_TICKS) {
+                    // Throttle idle: hold every motor at idle, no mixing --
+                    // otherwise a stick alone could raise a motor above
+                    // idle with the throttle closed.
+                    for (uint8_t m = 0; m < PT_NUM_MOTORS; m++) {
+                        motor_us[m] = PT_IDLE_US;
+                        pt_set(pt_motor[m].out, PT_IDLE_US);
+                    }
                 }
+                // else: fewer than PT_THR_LOW_DEBOUNCE_TICKS consecutive
+                // low readings -- treat as a single bad frame, not a real
+                // throttle-down. motor_us[] is left as-is and re-asserted
+                // unconditionally below, same as every other tick.
             } else {
+                thr_low_count = 0;
                 const int32_t thr_off = (int32_t)g_ch[IB_THR] - (int32_t)PT_MIN_US;
                 const int32_t r = ((int32_t)g_ch[IB_ROLL]  - 1500) * PT_ROLL_SIGN;
                 const int32_t p = ((int32_t)g_ch[IB_PITCH] - 1500) * PT_PITCH_SIGN;
@@ -204,9 +266,20 @@ void bench_passthrough_update()
                                    (p * pt_motor[m].pitch_f) +
                                    (y * pt_motor[m].yaw_f)) / 1000;
                     mix = (mix * PT_MIX_GAIN_PCT) / 100;
-                    int32_t us = (int32_t)PT_MIN_US + thr_off + mix;
-                    if (us < (int32_t)PT_MIN_US) { us = (int32_t)PT_MIN_US; }
-                    if (us > (int32_t)PT_MAX_US) { us = (int32_t)PT_MAX_US; }
+                    int32_t target = (int32_t)PT_MIN_US + thr_off + mix;
+                    if (target < (int32_t)PT_MIN_US) { target = (int32_t)PT_MIN_US; }
+                    if (target > (int32_t)PT_MAX_US) { target = (int32_t)PT_MAX_US; }
+
+                    // Climb-only slew limit -- see PT_RAMP_US_PER_SEC above.
+                    // A drop in target (stick pulled back) is applied
+                    // instantly; only a rise is capped per tick.
+                    int32_t us = (int32_t)motor_us[m];
+                    if (target > us) {
+                        const int32_t remaining = target - us;
+                        us += (ramp_max_step < remaining) ? ramp_max_step : remaining;
+                    } else {
+                        us = target;
+                    }
                     motor_us[m] = (uint16_t)us;
                     pt_set(pt_motor[m].out, (uint16_t)us);
                 }

@@ -204,6 +204,12 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
             }
         }
 
+        // AQCTLA/B is otherwise written once, at enable_ch() time, and
+        // never revisited -- same shape as the TBPRD/frequency bug fixed
+        // 2026-07-30. Cheap (a few register writes, no CMPA/CMPB touch),
+        // safe every tick.
+        rcoutDriver.reassert_outputs();
+
         callbacks->loop();
 
         // Bench RC->PWM passthrough for the four quad-X outputs (task 4,
