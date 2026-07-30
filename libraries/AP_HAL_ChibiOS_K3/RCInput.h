@@ -40,6 +40,14 @@ public:
     // understood. Do not reintroduce without figuring out why first.
     void update();
 
+    // Cumulative bytes pulled off the RX queue since boot. Diff it over a
+    // reporting window to get the live iBus byte rate: ~4160 B/s is a healthy
+    // link, a collapse points at wiring or the receiver, and a healthy rate
+    // alongside frozen channel values means decode lost sync (dropped bytes)
+    // rather than the link going away.
+    uint32_t bytes_seen() const { return _bytes_seen; }
+
 private:
     void *_sd;   // ChibiOS SerialDriver* (SD1)
+    uint32_t _bytes_seen = 0;
 };

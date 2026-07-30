@@ -25,6 +25,7 @@
 #include "RCInput.h"
 #include "bench_passthrough.h"
 #include "bench_imu.h"
+#include <AP_RCProtocol/AP_RCProtocol.h>   // AP::RC(), for the rc health line
 #include <hal.h>   // for the ChibiOS SerialDriver SD1
 #include "hwdef/boot/trace.h"  // RemoteProc trace buffer (readable without UART)
 #include "hwdef/boot/stack_paint.h"  // Q-25: SYS/main-thread stack high-water mark
@@ -255,10 +256,36 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
 
         static uint32_t loops;
         static uint32_t last_report_ms;
+        static uint32_t last_tick_ms;
+        static uint32_t dt_max_ms;
+        static uint32_t last_rc_bytes;
         loops++;
         const uint32_t now_ms = AP_HAL::millis();
+
+        /* Worst-case iteration time in the reporting window. The RX queue holds
+           64 bytes = ~15.4ms of iBus (see RCInput::update()), so any iteration
+           above that drops receiver bytes and desynchronises the decoder while
+           num_channels() stays latched -- frozen sticks that no failsafe can
+           see. dtmax is the direct test for that, and the first thing to read
+           if control is lost minutes into a run. */
+        if (last_tick_ms != 0) {
+            const uint32_t dt = now_ms - last_tick_ms;
+            if (dt > dt_max_ms) {
+                dt_max_ms = dt;
+            }
+        }
+        last_tick_ms = now_ms;
+
         if (now_ms - last_report_ms >= 5000) {
             last_report_ms = now_ms;
+            const uint32_t rc_bytes = rcinDriver.bytes_seen();
+            trace_printf("AP-K3: rc dtmax=%ums rcb=%u/5s rcch=%u thr=%u trcdrop=%u\n",
+                         dt_max_ms, rc_bytes - last_rc_bytes,
+                         (uint32_t)AP::RC().num_channels(),
+                         (uint32_t)AP::RC().read(2),
+                         trace_bytes_dropped());
+            last_rc_bytes = rc_bytes;
+            dt_max_ms = 0;
             /* pwmblk= (Q-34): RCOutput writes rejected by the exclusive mask,
                i.e. AP_Motors/SRV_Channels attempts to drive the motor pins.
                Climbing at roughly loop rate x 6 is the direct proof that a

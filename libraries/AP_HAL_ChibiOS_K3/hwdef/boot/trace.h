@@ -25,6 +25,7 @@
 #define TRACE_H
 
 #include <stdarg.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -35,6 +36,10 @@ extern "C" {
      (e.g. AP_HAL::panic(const char *errormsg, ...)). Same minimal format
      subset as trace_printf: %s, %c, %d, %u, %x, %%. */
   void trace_vprintf(const char *fmt, va_list ap);
+  /* Total bytes discarded by buffer compaction. Non-zero means the log now
+     shown by debugfs is a tail, not the whole run -- report it alongside the
+     log so a truncated capture is never mistaken for a complete one. */
+  uint32_t trace_bytes_dropped(void);
 #ifdef __cplusplus
 }
 #endif

@@ -54,13 +54,67 @@ static char trace_buffer[AM67_TRACEBUF_SIZE];
 #define TRACE_LOG_SIZE          (AM67_TRACEBUF_SIZE - TRACE_BOOTMARK_SIZE)
 
 static uint32_t trace_pos;
+static uint32_t trace_dropped;
+
+/*
+  Discard the oldest half of the log so recording can continue.
+
+  This buffer used to be strictly append-only: it filled after roughly three
+  minutes of steady-state logging and everything after that was silently lost.
+  That is the worst possible failure mode for diagnosing anything that goes
+  wrong minutes into a run, because the log stops well before the symptom and
+  gives no indication it has stopped -- a stalled firmware and a full buffer
+  look identical from Linux.
+
+  Compaction rather than a true ring buffer: the Linux remoteproc core exposes
+  this as a flat character array, so a wrapping buffer would hand the reader a
+  log spliced together at an arbitrary byte. Dropping the front keeps the
+  surviving log in chronological order and readable with plain cat, at the cost
+  of one 8 KiB byte copy per fill (~1.5 minutes apart at the current logging
+  rate). Resumes at a line boundary so the log never starts mid-line.
+
+  Runs with interrupts disabled (the caller holds irq_save), so it can cost at
+  most one UART byte at 115200 -- acceptable at this frequency, but do not lower
+  the compaction threshold without reconsidering that.
+*/
+static void trace_compact(void) {
+  static const char marker[] = "[trace: oldest half dropped]\n";
+  uint32_t keep_from = TRACE_LOG_SIZE / 2U;
+  uint32_t i;
+  uint32_t j = 0U;
+
+  while ((keep_from < trace_pos) && (trace_buffer[keep_from] != '\n')) {
+    keep_from++;
+  }
+  if (keep_from < trace_pos) {
+    keep_from++;                        /* skip the newline itself */
+  }
+  trace_dropped += keep_from;
+
+  for (i = 0U; i < (sizeof(marker) - 1U); i++) {
+    trace_buffer[j++] = marker[i];
+  }
+  for (i = keep_from; i < trace_pos; i++) {
+    trace_buffer[j++] = trace_buffer[i];
+  }
+  trace_pos = j;
+  while (j < TRACE_LOG_SIZE) {
+    trace_buffer[j++] = '\0';
+  }
+}
 
 static void trace_putc(char c) {
 
-  /* Last byte stays zero as terminator, logging stops when full.*/
-  if (trace_pos < (TRACE_LOG_SIZE - 1U)) {
-    trace_buffer[trace_pos++] = c;
+  /* Last byte stays zero as terminator.*/
+  if (trace_pos >= (TRACE_LOG_SIZE - 1U)) {
+    trace_compact();
   }
+  trace_buffer[trace_pos++] = c;
+}
+
+uint32_t trace_bytes_dropped(void) {
+
+  return trace_dropped;
 }
 
 static void trace_puts(const char *s) {
