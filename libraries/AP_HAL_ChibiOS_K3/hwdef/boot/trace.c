@@ -73,9 +73,13 @@ static uint32_t trace_dropped;
   of one 8 KiB byte copy per fill (~1.5 minutes apart at the current logging
   rate). Resumes at a line boundary so the log never starts mid-line.
 
-  Runs with interrupts disabled (the caller holds irq_save), so it can cost at
-  most one UART byte at 115200 -- acceptable at this frequency, but do not lower
-  the compaction threshold without reconsidering that.
+  Runs with interrupts disabled (the caller holds irq_save), and this buffer
+  lives in a NON-CACHEABLE DDR window, so every access goes to memory. Copied a
+  word at a time rather than a byte at a time for that reason: byte-wise, 8 KiB
+  of uncached DDR is milliseconds of interrupts-off, which is long enough to
+  overflow the 64-byte iBus RX queue (~15.4ms of data) and drop receiver
+  bytes -- a logging routine must not be able to cost RC frames. Do not lower
+  the compaction threshold, and do not revert the word copy.
 */
 static void trace_compact(void) {
   static const char marker[] = "[trace: oldest half dropped]\n";
@@ -94,10 +98,44 @@ static void trace_compact(void) {
   for (i = 0U; i < (sizeof(marker) - 1U); i++) {
     trace_buffer[j++] = marker[i];
   }
-  for (i = keep_from; i < trace_pos; i++) {
-    trace_buffer[j++] = trace_buffer[i];
+
+  /* Word-wise bulk move of the surviving tail, with byte-wise heads/tails for
+     whatever does not land on a 4-byte boundary. Source and destination cannot
+     overlap destructively here: j is ~30 and keep_from is at least half the
+     buffer, so the read pointer always stays ahead of the write pointer. */
+  {
+    uint32_t src = keep_from;
+    uint32_t n = trace_pos - keep_from;
+
+    while ((n > 0U) && (((src | j) & 3U) != 0U)) {
+      trace_buffer[j++] = trace_buffer[src++];
+      n--;
+    }
+    while (n >= 4U) {
+      *(uint32_t *)(void *)&trace_buffer[j] =
+        *(const uint32_t *)(const void *)&trace_buffer[src];
+      j += 4U;
+      src += 4U;
+      n -= 4U;
+    }
+    while (n > 0U) {
+      trace_buffer[j++] = trace_buffer[src++];
+      n--;
+    }
   }
+
   trace_pos = j;
+
+  /* Clear the freed tail so the debugfs reader, which hands back the whole
+     buffer rather than stopping at trace_pos, cannot show stale text after the
+     live log. Word-wise for the same uncached-DDR reason as the copy. */
+  while ((j < TRACE_LOG_SIZE) && ((j & 3U) != 0U)) {
+    trace_buffer[j++] = '\0';
+  }
+  while ((j + 4U) <= TRACE_LOG_SIZE) {
+    *(uint32_t *)(void *)&trace_buffer[j] = 0U;
+    j += 4U;
+  }
   while (j < TRACE_LOG_SIZE) {
     trace_buffer[j++] = '\0';
   }

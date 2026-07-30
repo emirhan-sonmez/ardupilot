@@ -124,7 +124,15 @@ constexpr uint8_t  SPI_CS_CHANNEL  = 3;      // CS3 = ICM-20948 (CS1 = baro)
 constexpr uint32_t SPI_SPEED_HZ = 250000;
 
 constexpr uint32_t SAMPLE_INTERVAL_MS = 20;   // 50 Hz read
-constexpr uint32_t REPORT_INTERVAL_MS = 1000; // 1 Hz trace line
+/*
+  0.2 Hz, not the original 1 Hz. At 1 Hz this one line was ~60% of all trace
+  output in steady state, which drove the buffer to compact every ~68s -- and
+  each compaction is an interrupts-off bulk copy of uncached DDR (trace.c). The
+  sample rate is unchanged at 50 Hz and the implausibility check still sees
+  every sample; only how often a healthy reading is printed changed. Corrupted
+  samples and resyncs still report immediately, so nothing diagnostic is lost.
+*/
+constexpr uint32_t REPORT_INTERVAL_MS = 5000;
 
 /*
   Runtime sample sanity check. Even at 250 kHz (DR-013), corruption has
