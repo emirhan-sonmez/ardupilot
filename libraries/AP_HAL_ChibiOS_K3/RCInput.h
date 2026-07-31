@@ -10,14 +10,20 @@
   channel extraction are entirely AP_RCProtocol_IBUS's job, not reimplemented
   here (see the ArduPilot iBus Port Handoff note, section 4a).
 
-  serial0/ChibiOS_K3::UARTDriver keeps MAVLink TX on the same physical wire's
-  TX side (pin 8); its RX side is disabled (see UARTDriver.cpp) so this class
-  is the sole consumer of SD1's incoming bytes -- two readers pulling off the
-  same ChibiOS input queue would each steal bytes meant for the other and
-  break both protocols' framing.
+  This class owns SD1 outright as of DR-016. MAVLink used to share the same
+  physical UART (TX on pin 8) and has since moved to the shared-memory rings
+  to Linux (IPCUARTDriver), so SD1 is no longer an AP_HAL serial port at all.
+  Consequence worth knowing: nothing else in the boot path calls sdStart() on
+  it any more, so init() below does -- previously AP_SerialManager's
+  serial0->begin() did it as a side effect.
 */
 class ChibiOS_K3::RCInput : public AP_HAL::RCInput {
 public:
+    // iBus line rate. Fixed by the protocol, not a parameter. Used both to
+    // open SD1 and to tell AP_RCProtocol what the line rate is; the two must
+    // not be allowed to drift apart.
+    static constexpr uint32_t IBUS_BAUD = 115200;
+
     explicit RCInput(void *serial_driver);
 
     void init() override;

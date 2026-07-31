@@ -436,8 +436,27 @@
  * @note    The default is 16 bytes for both the transmission and receive
  *          buffers.
  */
+/*
+ * Raised 64 -> 512 (Q-36 mitigation). SD1's RX queue is the iBus receive
+ * buffer, and iBus runs ~4160 B/s (32-byte frames at 130 Hz), so 64 bytes was
+ * only 15.4 ms of data. Any main-loop iteration longer than that overflowed
+ * the queue and ChibiOS dropped the excess on the floor -- and the IMU resync
+ * path was measured stalling the loop for 210-221 ms, fourteen times over the
+ * old margin. Dropped bytes desynchronise the iBus decoder while
+ * AP_RCProtocol keeps its channel count latched, so the sticks freeze with
+ * chans=14 and no failsafe can see it.
+ *
+ * 512 bytes is ~123 ms of iBus. That is not enough to cover a 220 ms stall
+ * either -- the real fix is making IMU resync not block the main loop -- but
+ * it turns "guaranteed loss" into "survives everything except the worst
+ * case", for 448 bytes of DDR.
+ *
+ * This is a global ChibiOS setting and also sizes the TX queue. That side no
+ * longer matters: MAVLink left this UART for the shared-memory rings
+ * (DR-016), so SD1's TX queue is now unused.
+ */
 #if !defined(SERIAL_BUFFERS_SIZE) || defined(__DOXYGEN__)
-#define SERIAL_BUFFERS_SIZE                 64
+#define SERIAL_BUFFERS_SIZE                 512
 #endif
 
 /*===========================================================================*/

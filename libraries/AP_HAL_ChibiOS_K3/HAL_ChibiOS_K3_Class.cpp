@@ -21,6 +21,7 @@
 #include "Semaphores.h"
 #include "Util.h"
 #include "UARTDriver.h"
+#include "IPCUARTDriver.h"
 #include "RCOutput.h"
 #include "RCInput.h"
 #include "SPIDevice.h"
@@ -29,24 +30,36 @@
 #include <AP_RCProtocol/AP_RCProtocol.h>   // AP::RC(), for the rc health line
 #include <hal.h>   // for the ChibiOS SerialDriver SD1
 #include "hwdef/boot/trace.h"  // RemoteProc trace buffer (readable without UART)
+#include "hwdef/boot/ipc_ring.h"  // MAVLink transport to Linux (DR-016)
 #include "hwdef/boot/stack_paint.h"  // Q-25: SYS/main-thread stack high-water mark
 
 // --- driver instances ---
-// The AM67 port implements a single physical UART (SD1 = UART1, 40-pin header
-// pins 8 TX / 10 RX). Its TX side (pin 8) is AP serial0 (SERIAL0), carrying
-// MAVLink 2 out -- no GCS is attached this milestone, so outbound-only is
-// fine (see MAVLink and QGroundControl notes). Its RX side (pin 10) belongs
-// exclusively to ChibiOS_K3::RCInput (iBus in, see RCInput.h/.cpp);
-// ChibiOS_K3::UARTDriver's _read()/_available() are disabled so the two
-// don't race for the same incoming bytes. serial1-9 have no wired hardware
-// yet -> Empty:: (null) stubs.
+// serial0 (SERIAL0) carries MAVLink 2, and as of DR-016 it is NOT a physical
+// UART: it is a shared-memory ring pair to Linux (hwdef/boot/ipc_ring.c),
+// bridged there to UDP 14550 for QGroundControl. The aircraft has to fly, so
+// a wired ground link was rejected; wireless forces Linux into the path
+// because Wi-Fi is SDIO + wl18xx and the R5F cannot reach it.
 //
-// hal.console is a SEPARATE Empty:: instance, not aliased to serial0: once
-// MAVLink starts, nothing may write plain text to the physical UART (it would
-// corrupt the MAVLink byte stream). Boot/diagnostic breadcrumbs go to the
-// RemoteProc trace buffer (trace_printf) instead, readable at
-// /sys/kernel/debug/remoteproc/remoteprocN/trace0.
-static ChibiOS_K3::UARTDriver serial0Driver((void *)&SD1);
+// This also settles the pin-10 conflict by removing it. The AM67 port has a
+// single physical UART (SD1 = UART1, header pins 8 TX / 10 RX) and MAVLink
+// used to share it with iBus, which meant MAVLink was TX-only -- QGC could
+// never talk back. SD1 now belongs entirely to ChibiOS_K3::RCInput (iBus on
+// pin 10) and is no longer an AP_HAL serial port at all. NOTE: that makes
+// RCInput::init() responsible for sdStart()ing it, since AP_SerialManager no
+// longer opens it for us.
+//
+// ChibiOS_K3::UARTDriver is consequently unused right now. It is kept, not
+// deleted: it is the working, hardware-verified serial backend and it is what
+// a SiK telemetry radio on a second UART would use (see [[MAVLink and
+// QGroundControl]] -- Wi-Fi is a bench/config link, not a flight link).
+//
+// serial1-9 have no wired hardware yet -> Empty:: (null) stubs.
+//
+// hal.console is a SEPARATE Empty:: instance, not aliased to serial0: nothing
+// may write plain text into the MAVLink byte stream. Boot/diagnostic
+// breadcrumbs go to the RemoteProc trace buffer (trace_printf) instead,
+// readable at /sys/kernel/debug/remoteproc/remoteprocN/trace0.
+static ChibiOS_K3::IPCUARTDriver serial0Driver;
 static Empty::UARTDriver consoleDriver;
 static Empty::UARTDriver serial1Driver;
 static Empty::UARTDriver serial2Driver;
@@ -125,12 +138,15 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
     scheduler->init();               // halInit() + chSysInit()
     trace_printf("AP-K3: scheduler->init done\n");
 
-    /* serial0 (SD1 / AM67 UART1, pins 8 TX / 10 RX) is the MAVLink UART for
-       this milestone. Leave it unopened here -- AP_SerialManager (inside
-       callbacks->setup()) owns begin() at the SERIAL0_BAUD parameter, so it
-       is opened exactly once, at the right baud, by the normal vehicle boot
-       path. */
-    trace_printf("AP-K3: MAVLink UART = serial0 (SD1/UART1, pins 8 TX/10 RX)\n");
+    /* serial0 is the MAVLink port and is backed by the shared-memory rings to
+       Linux (DR-016), not by a UART. Established here, before anything can
+       write to it, rather than being left to AP_SerialManager's begin():
+       ipc_ring_init() bumps the epoch and clears the indices, and doing that
+       later -- after GCS_MAVLINK has begun streaming, or worse, four times
+       over as the boot path reopens the port -- would tear the stream under a
+       Linux bridge that had already attached. begin() is idempotent for
+       exactly this reason. */
+    ipc_ring_init();
 
     /* AP_BoardConfig::board_setup() would normally call hal.rcin->init() (and
        gpio/rcout) but that path is gated to `#if CONFIG_HAL_BOARD ==
@@ -196,11 +212,11 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
                   pacing correctly; a huge number means _have_sample is
                   never being cleared (ins.update() not running) and the
                   loop is free-running.
-         thr=     cumulative writes to the AM67 UART1 THR register. If this
-                  keeps climbing while the PC still captures nothing, the
-                  bytes are leaving the SoC and the fault is in the pad mux
-                  / wiring / adapter, not in software. If it is frozen, the
-                  software TX path stopped feeding the UART. */
+         thr=     cumulative writes to the AM67 UART1 THR register. Kept, but
+                  it no longer says anything about MAVLink: that moved to the
+                  shared-memory rings (DR-016) and SD1 is RX-only for iBus
+                  now, so this should sit still. See the mav= line below for
+                  link health. */
     for (;;) {
         // Drain iBus bytes before running vehicle code this tick, so
         // read_radio() (an AP_Scheduler fast task) sees fresh data.
@@ -258,8 +274,12 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
         // trace line). No-op until bench_imu_init() found the part.
         ChibiOS_K3::bench_imu_update();
 
-        // Keep the UART TX draining independently of driver calls (the THRE
-        // interrupt is not firing on this UART -- see am67_uart1_tx_pump()).
+        // SD1 TX carries nothing since MAVLink moved to the rings (DR-016),
+        // so this is now a cheap no-op on an empty queue rather than a
+        // load-bearing pump. Kept deliberately: the THRE interrupt still does
+        // not fire on this UART (Q-26), so anything that ever writes to SD1
+        // again -- a SiK radio on this port, a debug console -- would strand
+        // its bytes without it, and the failure would be silent.
         const uint32_t tx_queued = am67_uart1_tx_pump();
 
         static uint32_t loops;
@@ -294,6 +314,23 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
                          trace_bytes_dropped());
             last_rc_bytes = rc_bytes;
             dt_max_ms = 0;
+            /* MAVLink link health, all from the shared-memory rings (DR-016).
+               These three numbers separate failures that otherwise look
+               identical from QGC's side ("no vehicle"):
+                 txq=      bytes queued towards Linux. Climbing and staying
+                           high means the daemon is not draining -- either it
+                           died or it never started.
+                 refused=  bytes GCS_MAVLink was denied for lack of room.
+                           Non-zero at all means the above went on long
+                           enough to overrun 8 KiB.
+                 host=     the daemon's own liveness counter, which the R5F
+                           never writes. Frozen while txq climbs is a dead
+                           bridge; advancing while QGC sees nothing puts the
+                           fault in the network, not on this board. */
+            ipc_ring_tick();
+            trace_printf("AP-K3: mav txq=%u refused=%u host=%u\n",
+                         ipc_ring_tx_pending(), ipc_ring_tx_refused(),
+                         ipc_ring_host_alive());
             /* pwmblk= (Q-34): RCOutput writes rejected by the exclusive mask,
                i.e. AP_Motors/SRV_Channels attempts to drive the motor pins.
                Climbing at roughly loop rate x 6 is the direct proof that a

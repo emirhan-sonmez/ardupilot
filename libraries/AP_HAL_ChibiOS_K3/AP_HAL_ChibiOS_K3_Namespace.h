@@ -21,6 +21,7 @@ namespace ChibiOS_K3 {
     class Scheduler;
     class Util;
     class UARTDriver;
+    class IPCUARTDriver;
     class RCOutput;
     class RCInput;
     struct SPIDeviceDesc;

@@ -66,6 +66,13 @@ MEMORY
     tcm       (rwx) : org = 0x00000100, len = 32k - 256 - 64
     ddr_rsc   (rw)  : org = 0xA1100000, len = 4k    /* resource table      */
     ddr_trace (rw)  : org = 0xA1110000, len = 16k   /* remoteproc trace    */
+    /* MAVLink IPC rings shared with Linux (ipc_ring.c). Deliberately inside
+       the 1 MB window MPU region 4 already maps NORMAL_NONCACHE | SHARED |
+       XN (board.c), the same window the trace buffer lives in -- so this
+       needs no MPU change and inherits an attribute set proven correct on
+       every boot. Must stay below 0xA1200000 (region 4's end) and must be
+       covered by a host device-tree reserved-memory node, see Q-37.*/
+    ddr_ipc   (rw)  : org = 0xA1120000, len = 64k   /* MAVLink IPC rings   */
     ddr       (rwx) : org = 0xA1240000, len = 14080k /* code, data, heap   */
 
     /* Unused regions referenced by the generic memory rules.*/
@@ -139,6 +146,20 @@ SECTIONS
     {
         KEEP(*(.trace))
     } > ddr_trace
+
+    /* NOLOAD like .trace: there is nothing meaningful to load, the header is
+       established at run time by ipc_ring_init().
+
+       Do NOT read this as "the contents survive a firmware reload". They do
+       not: Linux's rproc_elf_load_segments() memsets the (memsz - filesz)
+       tail of every PT_LOAD segment, so remoteproc zeroes this whole window
+       on each load and the epoch restarts at 1. The Linux bridge must
+       therefore resync on an invalidated magic or an impossible index pair,
+       not on the epoch alone -- see gem-mavbridge.*/
+    .ipc (NOLOAD) : ALIGN(4)
+    {
+        KEEP(*(.ipc))
+    } > ddr_ipc
 
     /* Bring-up boot probe, runs from TCM before any DDR execution, the
        banked mode stacks are allocated after it by rules_stacks.ld.*/

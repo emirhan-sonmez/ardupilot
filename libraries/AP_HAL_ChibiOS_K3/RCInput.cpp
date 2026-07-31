@@ -17,8 +17,28 @@ RCInput::RCInput(void *serial_driver) :
 
 void RCInput::init()
 {
+    /*
+      RCInput owns SD1 outright as of DR-016, and that includes starting it.
+
+      This used to be done for us: serial0 was SD1, so AP_SerialManager's
+      serial0->begin(SERIAL0_BAUD) ran sdStart() during callbacks->setup().
+      MAVLink has since moved to the shared-memory rings (IPCUARTDriver), SD1
+      is no longer an AP_HAL serial port, and nothing else in the boot path
+      opens it. Without this call the receiver line is dead and the only
+      symptom is `ibus: NO BYTES AT ALL` -- which looks exactly like a wiring
+      fault, so it would cost a bench session to find.
+
+      115200 8N1 is iBus, not a configurable choice, so it is pinned here
+      rather than taken from a parameter. It is also what process_byte() below
+      is told the line rate is; the two must agree.
+    */
+    SerialDriver *sd = (SerialDriver *)_sd;
+    SerialConfig cfg = { IBUS_BAUD };
+    sdStart(sd, &cfg);
+
     AP::RC().init();
-    trace_printf("AP-K3: RCInput init, iBus on UART1 RX (pin 10) @115200\n");
+    trace_printf("AP-K3: RCInput init, iBus on UART1 RX (pin 10) @%u, SD1 started here\n",
+                 (uint32_t)IBUS_BAUD);
 }
 
 void RCInput::update()
@@ -30,33 +50,35 @@ void RCInput::update()
     /*
       Drain until the queue is actually empty, not just one bufferful.
 
-      SERIAL_BUFFERS_SIZE is 64 (hwdef/cfg/halconf.h), so the RX queue holds
-      64 bytes = ~15.4ms of iBus (32-byte frames at 130 Hz, ~4160 B/s). A single
-      64-byte read per main-loop tick therefore caps RX throughput at
-      64 x loop_rate and leaves only ~1.5x headroom at the observed ~97 Hz loop:
-      any one iteration longer than 15.4ms overflows the queue and ChibiOS drops
-      the excess bytes on the floor. Dropped bytes corrupt iBus framing, and
-      AP_RCProtocol's channel count stays latched at its last good value while
-      read() returns stale data -- sticks appear frozen with chans=14, and
-      bench_passthrough's frame-timeout failsafe cannot see it because
-      num_channels() never falls below its threshold.
+      SERIAL_BUFFERS_SIZE is 512 (hwdef/cfg/halconf.h, raised from 64 as part
+      of the Q-36 mitigation), so the RX queue holds ~123 ms of iBus (32-byte
+      frames at 130 Hz, ~4160 B/s). Any main-loop iteration longer than that
+      still overflows the queue and ChibiOS still drops the excess on the
+      floor. Dropped bytes corrupt iBus framing, and AP_RCProtocol's channel
+      count stays latched at its last good value while read() returns stale
+      data -- sticks appear frozen with chans=14, and bench_passthrough's
+      frame-timeout failsafe cannot see it because num_channels() never falls
+      below its threshold.
+
       Suspected cause of control loss minutes into a run: the IMU resync path
       (bench_imu.cpp, DR-013) does a full re-bring-up of 32 polled SPI
-      transactions at 250 kHz inside one iteration, which comfortably exceeds
-      15.4ms.
+      transactions at 250 kHz inside one iteration, measured at 210-221 ms.
+      That still exceeds 123 ms. The queue size buys margin; it is not the
+      fix, and the fix is making resync not block the main loop.
 
       Bounded rather than unbounded: RX_DRAIN_MAX_BYTES caps the work per tick
-      so a receiver spraying faster than we can decode cannot starve the rest of
-      the loop. 4 bufferfuls covers a ~60ms stall, well past anything expected.
+      so a receiver spraying faster than we can decode cannot starve the rest
+      of the loop. Sized to drain a full queue in one tick -- less than that
+      and a burst arriving after a stall could never be caught up on.
     */
-    constexpr size_t RX_DRAIN_MAX_BYTES = 4 * sizeof(b);
+    constexpr size_t RX_DRAIN_MAX_BYTES = SERIAL_BUFFERS_SIZE;
     while (n < RX_DRAIN_MAX_BYTES) {
         const size_t got = chnReadTimeout(sd, b, sizeof(b), TIME_IMMEDIATE);
         if (got == 0) {
             break;
         }
         for (size_t i = 0; i < got; i++) {
-            AP::RC().process_byte(b[i], 115200);
+            AP::RC().process_byte(b[i], IBUS_BAUD);
         }
         n += got;
         if (got < sizeof(b)) {

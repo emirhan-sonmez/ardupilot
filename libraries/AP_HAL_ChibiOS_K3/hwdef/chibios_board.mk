@@ -53,11 +53,13 @@ include $(CHIBIOS)/os/common/ports/ARMv7-R/compilers/GCC/mk/port.mk
 # Linker script (used for the AP final link, not for the lib archive).
 LDSCRIPT = $(HWDEF_DIR)/AM67_R5F.ld
 
-# ChibiOS sources + board boot infra (resource table + remoteproc trace).
+# ChibiOS sources + board boot infra (resource table, remoteproc trace,
+# stack painting, and the shared-memory MAVLink rings to Linux).
 CSRC = $(ALLCSRC) \
        $(HWDEF_DIR)/boot/rsc_table.c \
        $(HWDEF_DIR)/boot/trace.c \
-       $(HWDEF_DIR)/boot/stack_paint.c
+       $(HWDEF_DIR)/boot/stack_paint.c \
+       $(HWDEF_DIR)/boot/ipc_ring.c
 CPPSRC  = $(ALLCPPSRC)
 ACSRC   =
 ACPPSRC =
