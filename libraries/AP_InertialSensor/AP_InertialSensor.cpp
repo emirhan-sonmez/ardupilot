@@ -38,6 +38,7 @@
 #include "AP_InertialSensor_ExternalAHRS.h"
 #include "AP_InertialSensor_Invensensev3.h"
 #include "AP_InertialSensor_NONE.h"
+#include "AP_InertialSensor_ICM20948_K3.h"
 #include "AP_InertialSensor_SCHA63T.h"
 #include "AP_InertialSensor_ASM330.h"
 #include "AP_InertialSensor_ADIS16607.h"
@@ -70,6 +71,17 @@
 */
 #ifndef HAL_GEMSTONE_ALLOW_INIT_NO_INS
 #define HAL_GEMSTONE_ALLOW_INIT_NO_INS 0
+#endif
+
+/*
+  Probe the onboard ICM-20948. Off by default so no other CHIBIOS_K3 board
+  picks it up; GemstoneO1R5F sets it via DEFINES in boards.py. Keep
+  HAL_GEMSTONE_ALLOW_INIT_NO_INS set alongside it for now -- if the probe
+  fails, continuing to a MAVLink prompt is far more useful on a bench than
+  config_error()'s permanent retry loop, and arming still fails either way.
+*/
+#ifndef HAL_GEMSTONE_INS_ICM20948
+#define HAL_GEMSTONE_INS_ICM20948 0
 #endif
 
 /* Define INS_TIMING_DEBUG to track down scheduling issues with the main loop.
@@ -1350,6 +1362,26 @@ AP_InertialSensor::detect_backends(void)
     // no INS device
 #else
     #error Unrecognised HAL_INS_TYPE setting
+#endif
+
+#if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3 && HAL_GEMSTONE_INS_ICM20948
+    /*
+      Onboard ICM-20948 on MCU_MCSPI0 CS3. Probed here rather than through the
+      HAL_INS_DEFAULT switch above because chibios_k3.h sets HAL_INS_DEFAULT to
+      HAL_INS_NONE -- this HAL has no board-type table to switch on, there is
+      exactly one board, and inventing one for a single entry would be worse.
+
+      Rotation from the ArduPilot Linux hwdef for this board, which is the
+      strongest available source: it is what a working ArduPilot build probes
+      on this hardware.
+
+      Uses AP_InertialSensor_ICM20948_K3, not the stock Invensensev2 driver.
+      See that class's header for why -- in short, Invensensev2 reads the FIFO
+      in blocks and block reads silently corrupt on this bus (Q-35).
+    */
+    ADD_BACKEND(AP_InertialSensor_ICM20948_K3::probe(
+                    *this, hal.spi->get_device("icm20948"),
+                    ROTATION_ROLL_180_YAW_90));
 #endif
 
     K3_INS_TRACE("detect_backends: board probe switch complete");

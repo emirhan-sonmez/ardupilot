@@ -42,6 +42,36 @@
   spiStart(): it touches MCU_GPIO0, a peripheral neither layer owns.
 */
 
+/*
+  TEMP-DIAG(Q-35): compile-time switch for the SPI bit-error characterisation
+  below. Left on until Q-35 closes; set to 0 to get the plain bench read-out
+  back without reverting code.
+  REMOVE-AFTER: Q-35 closed.
+*/
+/*
+  Off by default as of 2026-07-31. The sweep DAMAGES the part: after an epoch
+  at 1 MHz or 4 MHz, subsequent 250 kHz reads come back with that epoch's
+  stuck bit still set (1 MHz left bit 1 set and attempt 2 then read every
+  register | 0x02, at 250 kHz, where the same reads had been clean before the
+  sweep). So the diagnostic was manufacturing the configuration failures it
+  was built to study, and any measurement taken after it is measuring the
+  sweep. Turn it back on deliberately, on a boot that is measuring nothing
+  else, and expect to reboot afterwards.
+*/
+#ifndef IMU_BUS_DIAG_ENABLED
+#define IMU_BUS_DIAG_ENABLED 0
+#endif
+
+/*
+  TEMP-DIAG(Q-35): split the 14-byte sample burst into 14 single-register
+  reads. Set to 0 to get the burst back for comparison without reverting code.
+  REMOVE-AFTER: bursts are reliable, or the sample path moves to a real
+  AP_InertialSensor backend that can afford neither this nor the burst.
+*/
+#ifndef IMU_SPLIT_SAMPLE_READ
+#define IMU_SPLIT_SAMPLE_READ 1
+#endif
+
 extern const AP_HAL::HAL& hal;
 
 namespace {
@@ -169,6 +199,18 @@ constexpr uint32_t RETRY_INTERVAL_MS = 2000;
 // so even the generous bank-switch value is invisible; the sample path in
 // bench_imu_update() is a single burst read and pays SETTLE_US once.
 constexpr uint16_t SETTLE_US      = 200;
+/*
+  There is deliberately NO inter-transaction delay in the split sample read.
+
+  A 10us settle was tried and cost 100 ms/s: CH_CFG_ST_FREQUENCY is 1000, so
+  delay_microseconds() cannot resolve below one 1 ms tick and rounds up.
+  Fourteen of those per sample took the main loop from 149 Hz to 49.7 Hz and
+  dtmax from 9-11 ms to 23 ms, with the loop paced entirely by the IMU read.
+
+  No delay is needed: spiUnselect()/spiSelect() plus the address byte already
+  hold the chip select high far longer than the part's minimum. If a gap ever
+  is needed here, it has to be a busy-wait, not a scheduler delay.
+*/
 constexpr uint16_t BANK_SETTLE_US = 1000;
 constexpr uint8_t  WRITE_RETRIES  = 3;
 constexpr uint8_t  BUS_CHECK_SAMPLES = 32;
@@ -514,11 +556,432 @@ bool imu_try_bringup()
     return true;
 }
 
+#if IMU_BUS_DIAG_ENABLED
+/*
+  TEMP-DIAG(Q-35): per-bit-position error characterisation of the SPI read and
+  write paths.
+  REMOVE-AFTER: Q-35 is closed -- the part holds a configuration and delivers
+  uncorrupted samples across a 10-minute run.
+
+  Why this exists. The 2026-07-31 trace showed steady-state samples that were
+  strictly bimodal, the two clusters separated by ~256 LSB on every axis. 256
+  LSB is bit 8 of the 16-bit sample, which is bit 0 of the high byte, which is
+  the LAST bit clocked in that byte. Converted readings cannot distinguish:
+
+    - "bit 0 of the high bytes" from "bit 0 of every byte" (a low-byte error
+      is 1 LSB, invisible once scaled to mg/mdps);
+    - a write that never landed from a write that landed and was then read
+      back corrupted. Every failure in the 2026-07-30c log is recorded as
+      "wrote X read Y", which is one write followed by one read and cannot
+      separate the two.
+
+  So this measures raw bytes, and it writes the pattern ONCE before reading it
+  back many times. If the modal readback differs from what was written, the
+  write path is at fault. If the readbacks disagree with each other, the read
+  path is. Those are different bugs with different fixes.
+
+  Memory-light by construction: rather than storing N samples, it keeps a
+  population count of 1-bits per (byte offset, bit position). The majority
+  value over N reads is the truth and min(count, N-count) is that bit's error
+  count, in 6*8 uint16_t = 96 bytes. Main-stack high-water is 1876 of 8192.
+*/
+constexpr uint8_t  DIAG_PATTERN_LEN = 6;
+constexpr uint16_t DIAG_READS       = 256;
+
+/*
+  Bank 2 XG_OFFS_USRH..ZG_OFFS_USRL: six contiguous R/W bytes whose only
+  function is trimming gyro bias. Nothing else in the part offers six adjacent
+  bytes that accept an arbitrary pattern. Harmless to scribble on with the
+  aircraft on a bench, and restored to zero when the sweep finishes.
+*/
+constexpr uint8_t REG_XG_OFFS_USRH = 0x03;
+
+/*
+  Chosen for bit coverage, not aesthetics. 0xFF can only lose bits and 0x00 can
+  only gain them, which is what separates the "bits lost, never gained"
+  signature from ordinary noise; the rest mix adjacent 1s and 0s so a bit whose
+  margin depends on the previous bit's level shows itself.
+*/
+const uint8_t diag_pattern[DIAG_PATTERN_LEN] = { 0xA5, 0x5A, 0xFF, 0x00, 0xCC, 0x33 };
+
+/*
+  Longest burst under test. 14 matches bench_imu_update()'s ACCEL_OUT..TEMP_OUT
+  read exactly, which is the transaction the flight path actually issues and
+  the one whose corruption shows up as the 256 LSB bimodality.
+*/
+constexpr uint8_t DIAG_MAX_LEN = 14;
+
+// [offset][bit] -> how many of DIAG_READS reads saw a 1 in that position.
+uint16_t diag_ones[DIAG_MAX_LEN][8];
+
+void diag_reset_counts()
+{
+    for (uint8_t o = 0; o < DIAG_MAX_LEN; o++) {
+        for (uint8_t b = 0; b < 8; b++) {
+            diag_ones[o][b] = 0;
+        }
+    }
+}
+
+void diag_accumulate(const uint8_t *buf, uint8_t len)
+{
+    for (uint8_t o = 0; o < len; o++) {
+        for (uint8_t b = 0; b < 8; b++) {
+            if ((buf[o] >> b) & 1U) {
+                diag_ones[o][b]++;
+            }
+        }
+    }
+}
+
+/*
+  Burst-length sweep -- the measurement that matters.
+
+  Established 2026-07-31: 2-byte transactions (one register read) are perfect,
+  0/256 across many epochs, while 7-byte bursts corrupt exactly one bit in
+  exactly 128 of 256 reads. Exactly half is deterministic alternation, not
+  marginal timing -- compare 4 MHz, which scatters (29, 49, 130, 512) the way
+  real electrical marginality does. Two different faults; this measures the
+  first one.
+
+  What this reports is *instability*, not correctness: min(ones, reads-ones)
+  per bit is nonzero only when the 256 reads disagree with each other. That
+  removes any need to know the true register contents, so the sweep can run
+  over registers whose reserved bits read back differently from what was
+  written without polluting the result.
+
+  The answer needed is the largest L that is stable. If L=1 works and nothing
+  else does, the flight sample path has to become 14 single-register reads.
+  If L holds to 4 or 8, the burst just needs splitting.
+*/
+void diag_length_sweep(uint8_t base_reg)
+{
+    static const uint8_t lengths[] = { 1, 2, 3, 4, 6, 8, 14 };
+    constexpr uint8_t num_lengths = 7;
+    uint8_t buf[DIAG_MAX_LEN];
+
+    for (uint8_t li = 0; li < num_lengths; li++) {
+        const uint8_t len = lengths[li];
+        uint32_t total = 0;
+        uint8_t worst_bit = 0;
+        uint8_t worst_off = 0;
+        uint32_t worst_val = 0;
+
+        diag_reset_counts();
+        for (uint16_t i = 0; i < DIAG_READS; i++) {
+            spi_read(base_reg, buf, len);
+            diag_accumulate(buf, len);
+            hal.scheduler->delay_microseconds(SETTLE_US);
+        }
+
+        for (uint8_t o = 0; o < len; o++) {
+            for (uint8_t b = 0; b < 8; b++) {
+                const uint16_t ones = diag_ones[o][b];
+                const uint16_t zeros = (uint16_t)(DIAG_READS - ones);
+                const uint16_t minority = (ones > zeros) ? zeros : ones;
+                total += minority;
+                if (minority > worst_val) {
+                    worst_val = minority;
+                    worst_bit = b;
+                    worst_off = o;
+                }
+            }
+        }
+
+        trace_printf("AP-K3: imu-diag  len=%u unstable=%u worst=b%u@o%u(%u/%u) %s\n",
+                     (uint32_t)len, (uint32_t)total,
+                     (uint32_t)worst_bit, (uint32_t)worst_off,
+                     (uint32_t)worst_val, (uint32_t)DIAG_READS,
+                     (total == 0) ? "STABLE" : "unstable");
+    }
+}
+
+/*
+  Single-byte read path, with no write anywhere in it. WHO_AM_I is read-only,
+  so a wrong answer here cannot be blamed on a lost configuration write -- it
+  is the cleanest read-path measurement the part offers.
+*/
+void diag_single_byte(uint16_t reads)
+{
+    uint16_t bit_errs[8] = { 0 };
+    uint16_t errs = 0;
+
+    set_bank(0);
+    for (uint16_t i = 0; i < reads; i++) {
+        const uint8_t got = read_reg(REG_WHO_AM_I);
+        const uint8_t diff = (uint8_t)(got ^ WHO_AM_I_VAL);
+        if (diff != 0) {
+            errs++;
+            for (uint8_t b = 0; b < 8; b++) {
+                if ((diff >> b) & 1U) {
+                    bit_errs[b]++;
+                }
+            }
+        }
+    }
+
+    trace_printf("AP-K3: imu-diag  single who_am_i errs=%u/%u b7..b0=%u,%u,%u,%u,%u,%u,%u,%u\n",
+                 (uint32_t)errs, (uint32_t)reads,
+                 (uint32_t)bit_errs[7], (uint32_t)bit_errs[6],
+                 (uint32_t)bit_errs[5], (uint32_t)bit_errs[4],
+                 (uint32_t)bit_errs[3], (uint32_t)bit_errs[2],
+                 (uint32_t)bit_errs[1], (uint32_t)bit_errs[0]);
+}
+
+/*
+  Multi-byte burst, which is the shape the sample path actually uses and the
+  shape the NuttX reference never exercised (single-word transfers only -- see
+  the SPI_SPEED_HZ commentary above).
+*/
+void diag_burst(uint16_t reads)
+{
+    uint8_t buf[DIAG_PATTERN_LEN];
+    uint8_t mode[DIAG_PATTERN_LEN];
+    uint32_t bitpos_errs[8]  = { 0 };
+    uint32_t offset_errs[DIAG_PATTERN_LEN] = { 0 };
+
+    set_bank(2);
+    for (uint8_t o = 0; o < DIAG_PATTERN_LEN; o++) {
+        spi_write((uint8_t)(REG_XG_OFFS_USRH + o), diag_pattern[o]);
+    }
+
+    diag_reset_counts();
+    for (uint16_t i = 0; i < reads; i++) {
+        spi_read(REG_XG_OFFS_USRH, buf, DIAG_PATTERN_LEN);
+        diag_accumulate(buf, DIAG_PATTERN_LEN);
+        hal.scheduler->delay_microseconds(SETTLE_US);
+    }
+
+    // Majority vote per bit. A bit that is right most of the time contributes
+    // its minority count as the error total; a bit that is wrong most of the
+    // time flips the mode instead, and the mode-vs-written comparison below is
+    // what catches that case.
+    for (uint8_t o = 0; o < DIAG_PATTERN_LEN; o++) {
+        uint8_t m = 0;
+        for (uint8_t b = 0; b < 8; b++) {
+            const uint16_t ones = diag_ones[o][b];
+            const uint16_t zeros = (uint16_t)(reads - ones);
+            const uint16_t minority = (ones > zeros) ? zeros : ones;
+            if (ones > zeros) {
+                m |= (uint8_t)(1U << b);
+            }
+            bitpos_errs[b] += minority;
+            offset_errs[o] += minority;
+        }
+        mode[o] = m;
+    }
+
+    bool write_ok = true;
+    for (uint8_t o = 0; o < DIAG_PATTERN_LEN; o++) {
+        if (mode[o] != diag_pattern[o]) {
+            write_ok = false;
+        }
+    }
+
+    trace_printf("AP-K3: imu-diag  burst wrote=%x,%x,%x,%x,%x,%x mode=%x,%x,%x,%x,%x,%x writepath=%s\n",
+                 (uint32_t)diag_pattern[0], (uint32_t)diag_pattern[1],
+                 (uint32_t)diag_pattern[2], (uint32_t)diag_pattern[3],
+                 (uint32_t)diag_pattern[4], (uint32_t)diag_pattern[5],
+                 (uint32_t)mode[0], (uint32_t)mode[1], (uint32_t)mode[2],
+                 (uint32_t)mode[3], (uint32_t)mode[4], (uint32_t)mode[5],
+                 write_ok ? "OK" : "FAILED");
+
+    trace_printf("AP-K3: imu-diag  burst bitpos b7..b0=%u,%u,%u,%u,%u,%u,%u,%u\n",
+                 (uint32_t)bitpos_errs[7], (uint32_t)bitpos_errs[6],
+                 (uint32_t)bitpos_errs[5], (uint32_t)bitpos_errs[4],
+                 (uint32_t)bitpos_errs[3], (uint32_t)bitpos_errs[2],
+                 (uint32_t)bitpos_errs[1], (uint32_t)bitpos_errs[0]);
+
+    trace_printf("AP-K3: imu-diag  burst offset o0..o5=%u,%u,%u,%u,%u,%u\n",
+                 (uint32_t)offset_errs[0], (uint32_t)offset_errs[1],
+                 (uint32_t)offset_errs[2], (uint32_t)offset_errs[3],
+                 (uint32_t)offset_errs[4], (uint32_t)offset_errs[5]);
+}
+
+/*
+  Restores the six offset registers. Runs at the known-best speed, after the
+  sweep, so a failure at 4 MHz cannot leave a bias trim behind.
+*/
+void diag_clear_offsets()
+{
+    set_bank(2);
+    for (uint8_t o = 0; o < DIAG_PATTERN_LEN; o++) {
+        spi_write((uint8_t)(REG_XG_OFFS_USRH + o), 0);
+    }
+}
+
+/*
+  Dumps the MCSPI registers that mcspi_init() is supposed to have just set.
+
+  The stuck-bit mask walks one position left per controller re-init (0x01,
+  0x02, ... 0x10, 0x40, 0x80), which is state surviving a reconfiguration
+  rather than a wrong constant. If any of these differ between a clean epoch
+  and a corrupted one, that difference is the bug. If they are all identical,
+  the fault is below the register interface and the next step is the scope.
+
+  Read directly rather than through the driver: spi_ch_getreg() is static to
+  hal_spi_lld.c, and adding an accessor to the ChibiOS port for a diagnostic
+  that is meant to be deleted is the wrong trade.
+*/
+uint32_t spi_peek(uint32_t offset)
+{
+    return *(volatile uint32_t *)(SPID1.base + offset);
+}
+
+void diag_dump_ctrl(const char *tag)
+{
+    const uint32_t ch = MCSPI_CH_OFFSET(SPI_CS_CHANNEL);
+
+    trace_printf("AP-K3: imu-diag  regs[%s] modulctrl=%x sysconfig=%x irqstatus=%x\n",
+                 tag,
+                 (uint32_t)spi_peek(MCSPI_MODULCTRL_OFFSET),
+                 (uint32_t)spi_peek(MCSPI_SYSCONFIG_OFFSET),
+                 (uint32_t)spi_peek(MCSPI_IRQSTATUS_OFFSET));
+    trace_printf("AP-K3: imu-diag  regs[%s] chconf=%x chctrl=%x chstat=%x hlsys=%x\n",
+                 tag,
+                 (uint32_t)spi_peek(MCSPI_CHCONF0_OFFSET + ch),
+                 (uint32_t)spi_peek(MCSPI_CHCTRL0_OFFSET + ch),
+                 (uint32_t)spi_peek(MCSPI_CHSTAT0_OFFSET + ch),
+                 (uint32_t)spi_peek(MCSPI_HL_SYSCONFIG_OFFSET));
+
+    // Channels share one bus. A CS left asserted by another channel puts a
+    // second slave on MISO, so every channel's CHCONF matters, not just ours.
+    trace_printf("AP-K3: imu-diag  regs[%s] chconf0..3=%x,%x,%x,%x\n",
+                 tag,
+                 (uint32_t)spi_peek(MCSPI_CHCONF0_OFFSET + MCSPI_CH_OFFSET(0)),
+                 (uint32_t)spi_peek(MCSPI_CHCONF0_OFFSET + MCSPI_CH_OFFSET(1)),
+                 (uint32_t)spi_peek(MCSPI_CHCONF0_OFFSET + MCSPI_CH_OFFSET(2)),
+                 (uint32_t)spi_peek(MCSPI_CHCONF0_OFFSET + MCSPI_CH_OFFSET(3)));
+}
+
+/*
+  Reads a fixed set of registers and reports the OR of (read ^ expected) for
+  the ones whose value is known and constant. Isolates the stuck mask for an
+  epoch in one line, instead of inferring it from six "wrote X read Y" lines.
+
+  WHO_AM_I is the only register whose correct value is known unconditionally.
+  The rest are compared against what a read returned moments earlier, so a
+  disagreement means the read path is unstable within the epoch, whatever the
+  true register contents are.
+*/
+void diag_stuck_mask()
+{
+    static const uint8_t probe_regs[] = { 0x00, 0x03, 0x05, 0x06, 0x07 };
+    constexpr uint8_t num_probe = 5;
+    uint8_t first[num_probe];
+    uint8_t diff_or = 0;
+    uint8_t who_diff = 0;
+
+    set_bank(0);
+    for (uint8_t i = 0; i < num_probe; i++) {
+        first[i] = read_reg(probe_regs[i]);
+    }
+    who_diff = (uint8_t)(first[0] ^ WHO_AM_I_VAL);
+
+    for (uint8_t pass = 0; pass < 8; pass++) {
+        for (uint8_t i = 0; i < num_probe; i++) {
+            diff_or |= (uint8_t)(read_reg(probe_regs[i]) ^ first[i]);
+        }
+    }
+
+    trace_printf("AP-K3: imu-diag  probe who_am_i=%x whodiff=%x reread_diff=%x r03=%x r05=%x r06=%x r07=%x\n",
+                 (uint32_t)first[0], (uint32_t)who_diff, (uint32_t)diff_or,
+                 (uint32_t)first[1], (uint32_t)first[2],
+                 (uint32_t)first[3], (uint32_t)first[4]);
+}
+
+void diag_at_speed(uint32_t speed_hz)
+{
+    if (spi_started) {
+        spiStop(&SPID1);
+        spi_started = false;
+    }
+    spicfg.speed = speed_hz;
+    spiStart(&SPID1, &spicfg);
+    spi_started = true;
+
+    // The cached bank number describes the part, not the bus, but a speed
+    // change re-runs mcspi_init() and any in-flight state is gone with it.
+    // Forcing a re-select costs one transaction and removes the question.
+    current_bank = -1;
+    xfer_failed  = false;
+
+    trace_printf("AP-K3: imu-diag speed=%u n=%u\n",
+                 (uint32_t)speed_hz, (uint32_t)DIAG_READS);
+    diag_dump_ctrl("post-init");
+    diag_stuck_mask();
+    diag_single_byte(DIAG_READS);
+    diag_burst(DIAG_READS);
+    // Pattern is now in bank 2 0x03..0x08, so a sweep based at 0x00 covers
+    // both plain config registers and six bit-rich ones.
+    diag_length_sweep(0x00);
+    diag_dump_ctrl("post-burst");
+    if (xfer_failed) {
+        trace_printf("AP-K3: imu-diag  NOTE a transfer timed out at this speed\n");
+    }
+}
+
+/*
+  Sweeps the three speeds DR-013 argued about, with per-bit resolution instead
+  of the pass/fail count bus_check() gives. 4 MHz is expected to be bad (0/32
+  historically) and is included precisely for that: a known-bad point
+  calibrates what the counters look like when the bus really is failing.
+*/
+void bus_diag_sweep()
+{
+    /*
+      4 MHz is deliberately NOT in this list any more. Its failures are a
+      different fault -- writes lose bits and the error counts scatter -- and
+      running it POISONS the part for every later epoch: after the 2026-07-31
+      sweep, single-byte reads that had been 0/256 came back |0x08 and the
+      AP_HAL selftest read WHO_AM_I=1a. Characterise it separately, on a boot
+      that is not also measuring something else.
+    */
+    static const uint32_t speeds[] = { 250000, 1000000 };
+    constexpr uint8_t num_speeds = 2;
+
+    // Reference epoch: the controller as bring-up left it, before this sweep
+    // touches anything. On the 2026-07-31 boot this was the one epoch whose
+    // register reads were sane, so it is the "known good" side of the diff.
+    diag_dump_ctrl("epoch0");
+    diag_stuck_mask();
+
+    // Trigger isolation, before the speed sweep perturbs anything. Four
+    // rounds in the epoch bring-up left behind, one re-init at the same
+    // speed, four more rounds. Same transactions throughout; the only
+    // difference is the mcspi_init() in the middle.
+    for (uint8_t i = 0; i < num_speeds; i++) {
+        diag_at_speed(speeds[i]);
+    }
+
+    // Back to the operating speed, then undo the scribble.
+    diag_at_speed(SPI_SPEED_HZ);
+    diag_clear_offsets();
+
+    // The sweep left the part configured by nothing in particular. Force the
+    // normal bring-up path to run again rather than sampling through whatever
+    // state 4 MHz happened to leave behind.
+    current_bank = -1;
+}
+#endif  // IMU_BUS_DIAG_ENABLED
+
 }  // namespace
 
 void ChibiOS_K3::bench_imu_init()
 {
     imu_present = imu_try_bringup();
+
+#if IMU_BUS_DIAG_ENABLED
+    // TEMP-DIAG(Q-35): runs once, after bring-up so the part is awake and out
+    // of sleep. Costs ~2 s of boot and ~15 trace lines.
+    // REMOVE-AFTER: Q-35 closed.
+    if (imu_present) {
+        bus_diag_sweep();
+        imu_present = imu_try_bringup();
+    } else {
+        trace_printf("AP-K3: imu-diag skipped, bring-up failed\n");
+    }
+#endif
 }
 
 void ChibiOS_K3::bench_imu_update()
@@ -556,7 +1019,31 @@ void ChibiOS_K3::bench_imu_update()
     uint8_t raw[14];
     xfer_failed = false;
     set_bank(0);
+#if IMU_SPLIT_SAMPLE_READ
+    /*
+      TEMP-DIAG(Q-35): read the sample as 14 single-register transactions
+      instead of one 14-byte burst.
+
+      Measured 2026-07-31 at 250 kHz, 256 reads per length, over three boots:
+      a 1-byte read is stable every single time (0/256, plus 32/32 bus checks),
+      while 4 bytes and above always corrupt one bit position, which resolves
+      as a coin flip. 14 bytes is the worst case in that table and it is
+      exactly what this function used to issue -- which is why steady-state
+      samples came back bimodal, the two clusters separated by 256 LSB on
+      every axis. 256 LSB is bit 8 of the sample, i.e. bit 0 of the high byte.
+
+      Cost is ~1.1 ms per sample against a 20 ms interval, so ~5% of the core
+      at the 50 Hz bench rate. That is affordable here and NOT affordable at
+      the >=1 kHz gyro rate flight needs, so this is a way to get trustworthy
+      data now, not the final design. The burst has to be made to work, or the
+      bus speed raised, before this can carry an AP_InertialSensor backend.
+    */
+    for (uint8_t i = 0; i < sizeof(raw); i++) {
+        spi_read((uint8_t)(REG_ACCEL_OUT + i), &raw[i], 1);
+    }
+#else
     spi_read(REG_ACCEL_OUT, raw, sizeof(raw));
+#endif
 
     ax = (int16_t)((uint16_t)raw[0]  << 8 | raw[1]);
     ay = (int16_t)((uint16_t)raw[2]  << 8 | raw[3]);

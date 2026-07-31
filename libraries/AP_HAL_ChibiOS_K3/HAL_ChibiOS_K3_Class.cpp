@@ -187,11 +187,25 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
        set_exclusive_mask(). */
     rcoutDriver.set_exclusive_mask(ChibiOS_K3::PT_EXCLUSIVE_MASK);
 
-    // Bench ICM-20948 bring-up on MCU_MCSPI0 CS3. Before setup(), so a
-    // wrong chip select or a bus Linux still owns shows up as its own trace
-    // line rather than being lost among the vehicle's own init output.
-    // Reports and returns on failure -- never blocks the boot.
+    /*
+      Bench ICM-20948 bring-up on MCU_MCSPI0 CS3. Before setup(), so a wrong
+      chip select or a bus Linux still owns shows up as its own trace line
+      rather than being lost among the vehicle's own init output. Reports and
+      returns on failure -- never blocks the boot.
+
+      Mutually exclusive with the real AP_InertialSensor backend
+      (HAL_GEMSTONE_INS_ICM20948). bench_imu.cpp drives SPID1 directly with
+      spiSelect()/spiPolledExchange() and takes no bus lock, so running it
+      alongside the backend's periodic callback would interleave two
+      transactions on one chip select. That is the "two masters" failure this
+      port already spent a session on at the Linux/R5F boundary; there is no
+      reason to recreate it inside the firmware.
+    */
+#if HAL_GEMSTONE_INS_ICM20948
+    trace_printf("AP-K3: bench_imu skipped, AP_InertialSensor backend owns CS3\n");
+#else
     ChibiOS_K3::bench_imu_init();
+#endif
 
     /* Prove the AP_HAL SPI path independently of bench_imu.cpp's direct SPID1
        access, before AP_InertialSensor is given anything that depends on it.
@@ -270,9 +284,12 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
         // OFF.
         ChibiOS_K3::bench_passthrough_update();
 
-        // Sensor read-out, rate-limited internally (50 Hz sample, 1 Hz
-        // trace line). No-op until bench_imu_init() found the part.
+        // Sensor read-out, rate-limited internally (50 Hz sample, 0.2 Hz
+        // trace line). No-op until bench_imu_init() found the part, and
+        // compiled out entirely when the real backend owns the bus.
+#if !HAL_GEMSTONE_INS_ICM20948
         ChibiOS_K3::bench_imu_update();
+#endif
 
         // SD1 TX carries nothing since MAVLink moved to the rings (DR-016),
         // so this is now a cheap no-op on an empty queue rather than a

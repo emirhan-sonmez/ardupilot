@@ -1448,6 +1448,13 @@ class GemstoneO1R5F(Board):
             # Remove once the real onboard ICM-20948 backend is integrated;
             # see /home/emirhan/Documents/gemstone/examples/imu.
             HAL_GEMSTONE_ALLOW_INIT_NO_INS = 1,
+            # Probe the onboard ICM-20948 (MCU_MCSPI0 CS3) via
+            # AP_InertialSensor_ICM20948_K3, a bench backend that samples one
+            # register at a time. The stock Invensensev2 driver is NOT usable
+            # here: it reads the FIFO in blocks, and block reads on this bus
+            # silently corrupt one bit per transaction (Q-35, measured
+            # 2026-07-31). GemstoneO1R5F-only, like the define above.
+            HAL_GEMSTONE_INS_ICM20948 = 1,
             # M2: SERIAL0 (the only wired UART -- SD1/AM67 UART1, header pins
             # 8 TX / 10 RX) is the first MAVLink transport. MAVLink2 at these
             # values is already AP_SerialManager's compiled-in default when
