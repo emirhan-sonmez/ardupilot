@@ -129,12 +129,36 @@ static bool mailbox_message(uint32_t msg)
     switch (msg) {
     case RP_MBOX_SHUTDOWN:
         rcoutDriver.park_all_disarmed();
+
+        /* Trace BEFORE the ack, not after. The ack starts a hard ~2ms deadline
+           (see below) and trace_printf can compact the 16 KiB buffer, which is
+           an interrupts-off bulk copy of uncached DDR -- easily enough to blow
+           it. Nothing after the ack may be slow. */
+        trace_printf("AP-K3: mbox SHUTDOWN -> outputs parked, halting\n");
+
         /* Deliberately unchecked: if the TX FIFO is full the stop simply times
            out as it did before this existed. There is no useful recovery from
            an ISR, and retrying in a loop here is the one thing that could make
            matters worse. */
         (void)mailbox_send(RP_MBOX_SHUTDOWN_ACK);
-        trace_printf("AP-K3: mbox SHUTDOWN -> outputs parked, ack sent\n");
+
+        /* The ack alone is not enough. k3_r5_rproc_stop() then polls
+           is_core_in_wfi() against a ~2ms deadline and fails -ETIMEDOUT if the
+           core is still executing -- which is exactly what happened the first
+           time this ran: the kernel logged "received shutdown_ack" and still
+           returned -110, because we acked and carried on running.
+
+           So stop here, permanently. Mask IRQ and FIQ, then WFI in a loop: on
+           ARMv7-R a masked interrupt still wakes WFI, so a bare WFI would fall
+           through on the next systick and drop the core back out of standby
+           before the kernel sampled it.
+
+           No return path by design. The kernel asserts this core's reset
+           moments later; the only way back is a fresh firmware load. */
+        __asm__ volatile ("cpsid if" ::: "memory");
+        for (;;) {
+            __asm__ volatile ("wfi");
+        }
         break;
 
     case RP_MBOX_ECHO_REQUEST:
