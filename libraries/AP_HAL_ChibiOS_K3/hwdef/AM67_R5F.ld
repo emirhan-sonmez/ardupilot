@@ -169,8 +169,89 @@ SECTIONS
     } > tcm
 }
 
-/* Stack rules inclusion.*/
-INCLUDE rules_stacks.ld
+/* Stack rules.
+ *
+ * Deliberately NOT `INCLUDE rules_stacks.ld`. That file emits all six banked
+ * stacks into a single .stacks section in STACKS_RAM, which puts the sys stack
+ * -- and the sys stack IS the main thread's stack -- in TCM along with the
+ * exception stacks. TCM is internal to the R5F and is therefore invisible to
+ * Linux: /dev/mem can read every byte of the DDR carveout but cannot reach TCM
+ * at all.
+ *
+ * That mattered on 2026-08-01. Q-32 turned out to be a livelock in the main
+ * thread (still scheduled, but never leaving one inner retry loop), and the
+ * post-mortem technique that identified the state of every other thread from
+ * Linux -- walk the ChibiOS registry over /dev/mem, scrape saved LRs off the
+ * stack, resolve with addr2line -- worked for spi_bus and log_io precisely
+ * because their stacks are heap-allocated in DDR. Main was the one thread whose
+ * call chain could not be recovered, which is the only reason the loop is still
+ * unidentified.
+ *
+ * So the sections are split: the exception stacks stay in TCM, and only the sys
+ * stack moves to DDR, where a stalled main thread can be read post-mortem with
+ * no firmware change and no debugger.
+ *
+ * Safe pre-MPU: remoteproc loads .text into DDR and the core executes from DDR
+ * from its first instruction, so DDR is reachable well before board.c configures
+ * the MPU.
+ *
+ * Cost is small: board.c maps the DDR region NORMAL_WBWA (write-back
+ * write-allocate, MPU region 3), so stack accesses are cached, unlike the
+ * deliberately non-cacheable trace/IPC window at 0xA1100000 (region 4). The
+ * spi_bus and log_io threads already run on heap-allocated DDR stacks, so this
+ * makes main consistent with every other thread rather than special. Measured on
+ * hardware: loop rate unchanged at exactly 100 Hz, dtmax 11-12ms -> 13ms.
+ *
+ * Caveat for the post-mortem technique: because this region IS cached, a
+ * /dev/mem read from Linux sees DDR, not the R5F's dirty D-cache lines. In a
+ * stall that persists for minutes the frames of interest have long since been
+ * written back, and every decode so far has been self-consistent -- but a
+ * conclusion drawn from a stack read should be corroborated against the source,
+ * not trusted on its own.
+ */
+SECTIONS
+{
+    .stacks (NOLOAD) :
+    {
+        . = ALIGN(8);
+        __und_stack_base__ = .;
+        . += __und_stack_size__;
+        . = ALIGN(8);
+        __und_stack_end__ = .;
+
+        __abt_stack_base__ = .;
+        . += __abt_stack_size__;
+        . = ALIGN(8);
+        __abt_stack_end__ = .;
+
+        __fiq_stack_base__ = .;
+        . += __fiq_stack_size__;
+        . = ALIGN(8);
+        __fiq_stack_end__ = .;
+
+        __irq_stack_base__ = .;
+        . += __irq_stack_size__;
+        . = ALIGN(8);
+        __irq_stack_end__ = .;
+
+        __svc_stack_base__ = .;
+        . += __svc_stack_size__;
+        . = ALIGN(8);
+        __svc_stack_end__ = .;
+    } > tcm
+
+    .sysstack (NOLOAD) :
+    {
+        . = ALIGN(8);
+        __sys_stack_base__ = .;
+        __main_thread_stack_base__ = .;
+        . += __sys_stack_size__;
+        . = ALIGN(8);
+        __sys_stack_end__ = .;
+        __main_thread_stack_end__ = .;
+    } > ddr
+}
+
 INCLUDE rules_stacks_c1.ld
 
 /* Code rules inclusion.*/
