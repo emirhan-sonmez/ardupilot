@@ -55,6 +55,7 @@ static char trace_buffer[AM67_TRACEBUF_SIZE];
 
 static uint32_t trace_pos;
 static uint32_t trace_dropped;
+static uint32_t trace_compactions;
 
 /*
   Discard the oldest half of the log so recording can continue.
@@ -94,9 +95,24 @@ static void trace_compact(void) {
     keep_from++;                        /* skip the newline itself */
   }
   trace_dropped += keep_from;
+  trace_compactions++;
 
   for (i = 0U; i < (sizeof(marker) - 1U); i++) {
     trace_buffer[j++] = marker[i];
+  }
+
+  /* Pad the marker so the destination and the source share an alignment phase.
+     The bulk move below can only reach a word boundary when j and keep_from are
+     congruent mod 4: its guard clears only once BOTH are word-aligned, and it
+     advances them in lockstep. Start them out of phase and the guard never
+     clears, so the whole 8 KiB "word-wise" move silently degrades to a
+     byte-at-a-time copy of NON-CACHEABLE DDR with interrupts disabled -- the
+     exact millisecond-scale interrupts-off cost this routine exists to avoid.
+     Whether it happens depends on where the line boundary landed, so the
+     degradation is intermittent and invisible. At most three pad bytes, and j
+     (~30) can never overrun keep_from (>= half the buffer). */
+  while ((j & 3U) != (keep_from & 3U)) {
+    trace_buffer[j++] = ' ';
   }
 
   /* Word-wise bulk move of the surviving tail, with byte-wise heads/tails for
@@ -153,6 +169,11 @@ static void trace_putc(char c) {
 uint32_t trace_bytes_dropped(void) {
 
   return trace_dropped;
+}
+
+uint32_t trace_compaction_count(void) {
+
+  return trace_compactions;
 }
 
 static void trace_puts(const char *s) {

@@ -324,11 +324,18 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
         if (now_ms - last_report_ms >= 5000) {
             last_report_ms = now_ms;
             const uint32_t rc_bytes = rcinDriver.bytes_seen();
-            trace_printf("AP-K3: rc dtmax=%ums rcb=%u/5s rcch=%u thr=%u trcdrop=%u\n",
+            /* trcomp is the compaction COUNT, reported directly rather than
+               inferred from trcdrop arithmetic. Q-32 kills the firmware at what
+               looks like exactly two compactions on two different boards, but
+               that was reconstructed after the fact from byte counts; this
+               separates "died at the Nth compaction" from "died N seconds in",
+               which the compaction differential turns on. */
+            trace_printf("AP-K3: rc dtmax=%ums rcb=%u/5s rcch=%u thr=%u trcdrop=%u trcomp=%u\n",
                          dt_max_ms, rc_bytes - last_rc_bytes,
                          (uint32_t)AP::RC().num_channels(),
                          (uint32_t)AP::RC().read(2),
-                         trace_bytes_dropped());
+                         trace_bytes_dropped(),
+                         trace_compaction_count());
             last_rc_bytes = rc_bytes;
             dt_max_ms = 0;
             /* MAVLink link health, all from the shared-memory rings (DR-016).
