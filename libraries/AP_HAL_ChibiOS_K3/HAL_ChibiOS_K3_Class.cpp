@@ -32,6 +32,7 @@
 #include "hwdef/boot/trace.h"  // RemoteProc trace buffer (readable without UART)
 #include "hwdef/boot/ipc_ring.h"  // MAVLink transport to Linux (DR-016)
 #include "hwdef/boot/stack_paint.h"  // Q-25: SYS/main-thread stack high-water mark
+#include <am67_mailbox.h>  // remoteproc shutdown handshake with Linux
 
 // --- driver instances ---
 // serial0 (SERIAL0) carries MAVLink 2, and as of DR-016 it is NOT a physical
@@ -111,6 +112,49 @@ HAL_ChibiOS_K3::HAL_ChibiOS_K3() :
         nullptr)           // no CAN yet (K3 MCAN is Phase 3b)
 {}
 
+/*
+  Inbound remoteproc mailbox messages from Linux. ISR context, must not block.
+
+  SAFETY, AND THE ORDERING IS NOT NEGOTIABLE: the kernel asserts this core's
+  reset as soon as it receives the ack, and a stopped R5F leaves the PWM
+  peripherals emitting their last commanded pulse width indefinitely (Safety
+  and Failsafes 3.1). There is no watchdog -- M9 is open and the device tree
+  exposes no watchdog device at all -- so nothing downstream will catch it.
+  Acking before parking the outputs would convert "stop" into "latch the
+  current throttle forever", which is strictly worse than the timeout this
+  replaces. Park first, ack second.
+*/
+static bool mailbox_message(uint32_t msg)
+{
+    switch (msg) {
+    case RP_MBOX_SHUTDOWN:
+        rcoutDriver.park_all_disarmed();
+        /* Deliberately unchecked: if the TX FIFO is full the stop simply times
+           out as it did before this existed. There is no useful recovery from
+           an ISR, and retrying in a loop here is the one thing that could make
+           matters worse. */
+        (void)mailbox_send(RP_MBOX_SHUTDOWN_ACK);
+        trace_printf("AP-K3: mbox SHUTDOWN -> outputs parked, ack sent\n");
+        break;
+
+    case RP_MBOX_ECHO_REQUEST:
+        /* Free liveness probe from Linux that does not depend on the trace
+           buffer or the IPC ring -- both of which froze together during Q-32,
+           leaving no way to distinguish a stalled main loop from a dead core. */
+        (void)mailbox_send(RP_MBOX_ECHO_REPLY);
+        break;
+
+    default:
+        /* Trace and ignore. Never act on an unrecognised id: the kernel also
+           sends suspend-related messages this port does not implement, and
+           guessing at them risks parking the aircraft's outputs mid-flight. */
+        trace_printf("AP-K3: mbox unhandled msg=0x%x\n", msg);
+        break;
+    }
+
+    return false;
+}
+
 void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) const
 {
     (void)argc;
@@ -186,6 +230,14 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
        whichever ran last in the iteration. See RCOutput.h,
        set_exclusive_mask(). */
     rcoutDriver.set_exclusive_mask(ChibiOS_K3::PT_EXCLUSIVE_MASK);
+
+    /* Answer the Linux remoteproc shutdown request. Without this,
+       `echo stop > /sys/class/remoteproc/remoteprocN/state` blocks ~25s and
+       fails -EBUSY, so loading new firmware required a full power cycle --
+       compounded by Q-39, where `reboot` does not restart the SoC either.
+       Installed after set_exclusive_mask() because the handler parks the
+       outputs through write_exclusive() and must be the accepted writer. */
+    mailbox_init(mailbox_message);
 
     /*
       Bench ICM-20948 bring-up on MCU_MCSPI0 CS3. Before setup(), so a wrong

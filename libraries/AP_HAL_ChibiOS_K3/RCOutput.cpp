@@ -292,6 +292,19 @@ void RCOutput::write_exclusive(uint8_t chan, uint16_t period_us)
     hw_write(chan, period_us);
 }
 
+void RCOutput::park_all_disarmed()
+{
+    /* Only channels that were actually brought up. Writing a peripheral whose
+       clock never started is what ensure_peripheral()/_p_failed[] exist to
+       refuse, and this runs from an ISR on the way to a core reset -- the
+       worst possible place to stall on a dead peripheral. */
+    for (uint8_t ch = 0; ch < NUM_CH; ch++) {
+        if (_ch_enabled[ch]) {
+            hw_write(ch, PWM_MIN_US);
+        }
+    }
+}
+
 void RCOutput::hw_write(uint8_t chan, uint16_t period_us)
 {
     if (period_us < PWM_MIN_US) { period_us = PWM_MIN_US; }

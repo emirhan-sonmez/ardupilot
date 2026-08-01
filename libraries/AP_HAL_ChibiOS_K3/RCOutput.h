@@ -86,6 +86,14 @@ public:
     void     set_exclusive_mask(uint32_t mask);
     void     write_exclusive(uint8_t chan, uint16_t period_us);
 
+    /* Drive every channel to its disarmed pulse width, bypassing the exclusive
+       mask. For the remoteproc shutdown path only: the kernel resets this core
+       immediately after we acknowledge, and a stopped R5F leaves the PWM
+       peripherals emitting the last commanded width forever with no watchdog
+       to catch it. Safe from ISR context -- it only writes compare registers,
+       takes no lock and cannot block. */
+    void     park_all_disarmed();
+
     // Count of write() calls dropped by the exclusive mask. Non-zero and
     // climbing at ~loop_rate x NUM_CH is the direct proof that a second
     // writer was competing for these pins.
