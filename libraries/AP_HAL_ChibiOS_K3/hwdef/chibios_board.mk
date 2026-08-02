@@ -59,7 +59,8 @@ CSRC = $(ALLCSRC) \
        $(HWDEF_DIR)/boot/rsc_table.c \
        $(HWDEF_DIR)/boot/trace.c \
        $(HWDEF_DIR)/boot/stack_paint.c \
-       $(HWDEF_DIR)/boot/ipc_ring.c
+       $(HWDEF_DIR)/boot/ipc_ring.c \
+       $(HWDEF_DIR)/boot/ipc_storage.c
 CPPSRC  = $(ALLCPPSRC)
 ACSRC   =
 ACPPSRC =

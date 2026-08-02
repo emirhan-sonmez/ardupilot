@@ -28,4 +28,5 @@ namespace ChibiOS_K3 {
     class SPIBus;
     class SPIDevice;
     class SPIDeviceManager;
+    class Storage;
 }
