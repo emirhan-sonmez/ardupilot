@@ -31,6 +31,7 @@
 #include "AP_Compass_LSM9DS1.h"
 #include "AP_Compass_LIS3MDL.h"
 #include "AP_Compass_AK09916.h"
+#include "AP_Compass_AK09916_K3.h"
 #include "AP_Compass_QMC5883L.h"
 #if AP_COMPASS_DRONECAN_ENABLED
 #include "AP_Compass_DroneCAN.h"
@@ -1407,6 +1408,22 @@ void Compass::_detect_backends(void)
         add_backend(DRIVER_SITL, NEW_NOTHROW AP_Compass_SITL(i));
         RETURN_IF_NO_SPACE;
     }
+#endif
+
+#if AP_COMPASS_AK09916_K3_ENABLED
+    /*
+      Onboard AK09916, behind the ICM-20948's auxiliary I2C master. Probed
+      directly rather than through a board-type table for the same reason as
+      the INS and barometer on this HAL: there is exactly one board, and
+      inventing a table for a single entry would be worse.
+
+      ROTATION_ROLL_180, deliberately NOT the ICM's own
+      ROTATION_ROLL_180_YAW_90 -- the magnetometer is a separate die mounted
+      differently inside the package. UNVERIFIED against hardware; it comes
+      from the vault and cannot be checked without a known heading reference.
+    */
+    add_backend(DRIVER_AK09916, AP_Compass_AK09916_K3::probe(ROTATION_ROLL_180));
+    RETURN_IF_NO_SPACE;
 #endif
 
 #if AP_COMPASS_DRONECAN_ENABLED

@@ -7,6 +7,13 @@
 using namespace ChibiOS_K3;
 
 // TODO(S3+): back these with a real RTC / persistent time source.
+extern "C" size_t k3_heap_remaining(void);
+
+uint32_t Util::available_memory(void)
+{
+    return (uint32_t)k3_heap_remaining();
+}
+
 void Util::set_hw_rtc(uint64_t time_utc_usec)
 {
     (void)time_utc_usec;

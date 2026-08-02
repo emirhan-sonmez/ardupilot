@@ -23,6 +23,57 @@ constexpr uint8_t REG_ACCEL_CONFIG       = 0x14;
 // All banks
 constexpr uint8_t REG_BANK_SEL   = 0x7F;
 
+/*
+  Auxiliary I2C master registers. Bank 0 holds USER_CTRL and the status
+  register; the SLV channels live in bank 3. Mixing the two up reads plausible
+  garbage rather than failing, so every access below selects its bank first.
+  Values cross-checked against the vendor example in
+  ~/Documents/gemstone/examples/imu/icm20948.c, which drives this same part.
+*/
+// REG_USER_CTRL is already defined above with the other bank 0 registers.
+constexpr uint8_t REG_I2C_MST_STATUS = 0x17;   // bank 0
+constexpr uint8_t REG_I2C_MST_CTRL   = 0x01;   // bank 3
+constexpr uint8_t REG_I2C_SLV4_ADDR  = 0x13;   // bank 3
+constexpr uint8_t REG_I2C_SLV4_REG   = 0x14;   // bank 3
+constexpr uint8_t REG_I2C_SLV4_CTRL  = 0x15;   // bank 3
+constexpr uint8_t REG_I2C_SLV4_DO    = 0x16;   // bank 3
+constexpr uint8_t REG_I2C_SLV4_DI    = 0x17;   // bank 3
+
+constexpr uint8_t BIT_I2C_MST_EN     = 0x20;
+constexpr uint8_t BIT_I2C_MST_RST    = 0x02;   // self clearing
+constexpr uint8_t BIT_I2C_SLVX_EN    = 0x80;
+constexpr uint8_t BIT_I2C_SLV4_DONE  = 0x40;
+constexpr uint8_t BIT_I2C_SLV4_NACK  = 0x10;
+constexpr uint8_t BIT_I2C_READ       = 0x80;   // OR into the slave address
+
+// AK09916 magnetometer die, on the auxiliary bus.
+constexpr uint8_t AK09916_I2C_ADDR   = 0x0C;
+constexpr uint8_t AK09916_REG_WIA1   = 0x00;   // 0x48, company id
+constexpr uint8_t AK09916_REG_WIA2   = 0x01;   // 0x09, device id
+constexpr uint8_t AK09916_WIA1_VAL   = 0x48;
+constexpr uint8_t AK09916_WIA2_VAL   = 0x09;
+constexpr uint8_t AK09916_REG_ST1    = 0x10;   // first byte of the sample block
+constexpr uint8_t AK09916_REG_CNTL2  = 0x31;
+constexpr uint8_t AK09916_REG_CNTL3  = 0x32;
+constexpr uint8_t AK09916_MODE_CONT  = 0x08;   // continuous, matches AP_Compass_AK09916
+constexpr uint8_t AK09916_SRST       = 0x01;
+
+/*
+  The streamed block is ST1, HXL..HZH, TMPS, ST2 -- 9 bytes from 0x10. ST2 has
+  to be inside the read: the AK09916 holds its output registers until ST2 is
+  read, so a block that stops short leaves the magnetometer permanently latched
+  on one sample.
+*/
+constexpr uint8_t AK09916_BLOCK_LEN  = 9;
+
+// Bank 0. SLV0's copied bytes land here every master cycle.
+constexpr uint8_t REG_EXT_SLV_SENS_DATA_00 = 0x3B;
+
+// Bank 3, SLV0 channel.
+constexpr uint8_t REG_I2C_SLV0_ADDR  = 0x03;
+constexpr uint8_t REG_I2C_SLV0_REG   = 0x04;
+constexpr uint8_t REG_I2C_SLV0_CTRL  = 0x05;
+
 constexpr uint8_t WHO_AM_I_VAL   = 0xEA;
 constexpr uint8_t BIT_RESET      = 0x80;   // PWR_MGMT_1
 constexpr uint8_t BIT_I2C_IF_DIS = 0x10;   // USER_CTRL, pin the part to SPI
@@ -101,6 +152,298 @@ AP_InertialSensor_Backend *AP_InertialSensor_ICM20948_K3::probe(
 bool AP_InertialSensor_ICM20948_K3::read_reg(uint8_t reg, uint8_t &value)
 {
     return _dev->read_registers(reg, &value, 1);
+}
+
+/*
+  Bring up the ICM's auxiliary I2C master.
+
+  I2C_IF_DIS is deliberately NOT touched here: the primary interface is already
+  pinned to SPI during init_sensor(), and re-writing USER_CTRL's other bits
+  from a stale read is how a working SPI link gets dropped mid-configuration.
+  Read-modify-write, set only I2C_MST_EN.
+*/
+bool AP_InertialSensor_ICM20948_K3::aux_master_init()
+{
+    uint8_t user_ctrl = 0;
+
+    if (!select_bank(0) || !read_reg(REG_USER_CTRL, user_ctrl)) {
+        return false;
+    }
+
+    // Reset the master first. The bit is self clearing; the part needs a
+    // moment before the channel registers mean anything.
+    if (!_dev->write_register(REG_USER_CTRL,
+                              (uint8_t)(user_ctrl | BIT_I2C_MST_RST))) {
+        return false;
+    }
+    hal.scheduler->delay(10);
+
+    if (!_dev->write_register(REG_USER_CTRL,
+                              (uint8_t)(user_ctrl | BIT_I2C_MST_EN))) {
+        return false;
+    }
+
+    /*
+      400 kHz on the auxiliary bus. 0x07 is the recommended divider for this
+      part and is what the vendor example uses; the AK09916 is rated well
+      above it, and the aux bus is entirely internal to the package so it has
+      none of the signal-integrity exposure the external SPI wiring has.
+    */
+    if (!select_bank(3) || !_dev->write_register(REG_I2C_MST_CTRL, 0x07)) {
+        return false;
+    }
+
+    hal.scheduler->delay(10);
+    return true;
+}
+
+/*
+  One byte to or from a device on the auxiliary bus, through SLV4.
+
+  SLV4 is the configuration channel: unlike SLV0-3 it reports DONE and NACK, so
+  a part that is absent or wedged is distinguishable from a bus that is simply
+  quiet. That distinction is worth the extra registers -- without it, "no
+  magnetometer" and "aux master misconfigured" look identical.
+*/
+bool AP_InertialSensor_ICM20948_K3::aux_xfer(uint8_t addr, uint8_t reg,
+                                             uint8_t *value, bool is_read)
+{
+    uint8_t status = 0;
+
+    if (!select_bank(0)) {
+        return false;
+    }
+    /*
+      I2C_MST_STATUS clears on read. Drain it before arming, or a DONE left
+      over from the previous transaction is mistaken for this one completing
+      and the caller reads stale data with no error.
+    */
+    (void)read_reg(REG_I2C_MST_STATUS, status);
+
+    if (!select_bank(3)) {
+        return false;
+    }
+    if (!_dev->write_register(REG_I2C_SLV4_ADDR,
+                              (uint8_t)(is_read ? (addr | BIT_I2C_READ) : addr))) {
+        return false;
+    }
+    if (!_dev->write_register(REG_I2C_SLV4_REG, reg)) {
+        return false;
+    }
+    if (!is_read && !_dev->write_register(REG_I2C_SLV4_DO, *value)) {
+        return false;
+    }
+    if (!_dev->write_register(REG_I2C_SLV4_CTRL, BIT_I2C_SLVX_EN)) {
+        return false;
+    }
+
+    // Bounded: a transaction that never completes must not wedge the caller.
+    bool done = false;
+    for (uint8_t i = 0; i < 50; i++) {
+        hal.scheduler->delay_microseconds(200);
+        if (!select_bank(0) || !read_reg(REG_I2C_MST_STATUS, status)) {
+            return false;
+        }
+        if ((status & BIT_I2C_SLV4_DONE) != 0) {
+            done = true;
+            break;
+        }
+    }
+
+    if (!done) {
+        // Disarm, or the channel keeps retrying against a dead slave forever.
+        if (select_bank(3)) {
+            (void)_dev->write_register(REG_I2C_SLV4_CTRL, 0);
+        }
+        return false;
+    }
+    if ((status & BIT_I2C_SLV4_NACK) != 0) {
+        return false;
+    }
+
+    if (is_read) {
+        if (!select_bank(3) || !read_reg(REG_I2C_SLV4_DI, *value)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/*
+  Arm SLV0 to copy a block from an auxiliary device every master cycle.
+
+  SLV4 is fine for configuration but hopeless as a data path: each transaction
+  needs its own arm-and-poll round trip, so a 9-byte sample would cost nine of
+  them. SLV0 runs autonomously and drops the bytes into EXT_SLV_SENS_DATA_00,
+  which the host then reads as an ordinary register block.
+*/
+bool AP_InertialSensor_ICM20948_K3::aux_slv0_stream(uint8_t addr, uint8_t reg,
+                                                    uint8_t len)
+{
+    if (!select_bank(3)) {
+        return false;
+    }
+    if (!_dev->write_register(REG_I2C_SLV0_ADDR, (uint8_t)(addr | BIT_I2C_READ))) {
+        return false;
+    }
+    if (!_dev->write_register(REG_I2C_SLV0_REG, reg)) {
+        return false;
+    }
+    // Length lives in the low nibble of CTRL, alongside the enable bit.
+    return _dev->write_register(REG_I2C_SLV0_CTRL,
+                                (uint8_t)(BIT_I2C_SLVX_EN | (len & 0x0F)));
+}
+
+/*
+  Put the AK09916 into continuous mode and stream its samples.
+
+  Mode and register values match AP_Compass_AK09916 so that a compass backend
+  built on this sees exactly what the stock driver would.
+*/
+bool AP_InertialSensor_ICM20948_K3::aux_start_ak09916()
+{
+    if (!aux_write(AK09916_I2C_ADDR, AK09916_REG_CNTL3, AK09916_SRST)) {
+        return false;
+    }
+    hal.scheduler->delay(10);
+
+    if (!aux_write(AK09916_I2C_ADDR, AK09916_REG_CNTL2, AK09916_MODE_CONT)) {
+        return false;
+    }
+    hal.scheduler->delay(10);
+
+    return aux_slv0_stream(AK09916_I2C_ADDR, AK09916_REG_ST1, AK09916_BLOCK_LEN);
+}
+
+/*
+  Copy the most recent streamed magnetometer block out of the ICM.
+*/
+bool AP_InertialSensor_ICM20948_K3::aux_read_mag(uint8_t *buf)
+{
+    if (!select_bank(0)) {
+        return false;
+    }
+    return _dev->read_registers(REG_EXT_SLV_SENS_DATA_00, buf, AK09916_BLOCK_LEN);
+}
+
+AP_InertialSensor_ICM20948_K3 *AP_InertialSensor_ICM20948_K3::_singleton;
+
+bool AP_InertialSensor_ICM20948_K3::get_mag_field(Vector3f &field,
+                                                  uint32_t &counter) const
+{
+    if (!_mag_ok) {
+        return false;
+    }
+    field = _mag_field;
+    counter = _mag_counter;
+    return true;
+}
+
+/*
+  Pull one magnetometer block, called from the IMU sample path.
+
+  Rate-divided to half the IMU rate: the AK09916 runs at 100 Hz and a compass
+  gains nothing from being read faster than it updates, while every read costs
+  9 bytes on a 250 kHz bus shared with the gyro.
+
+  Deliberately does NOT gate on ST1's data-ready bit. SLV0 performs its own
+  read on the auxiliary side and consumes DRDY doing so, so by the time the
+  host reads EXT_SLV_SENS_DATA the flag has already been cleared -- measured
+  on hardware, ST1 reads 0x00 or 0x02 (overrun) while the field values are
+  demonstrably updating. Requiring DRDY here, as AP_Compass_AK09916 does on a
+  directly-attached part, would reject every sample.
+
+  ST2 overflow IS honoured: that flag means the reading is out of range and
+  genuinely must not be used.
+*/
+void AP_InertialSensor_ICM20948_K3::mag_sample()
+{
+    uint8_t b[AK09916_BLOCK_LEN];
+
+    if (++_mag_divider < 2) {
+        return;
+    }
+    _mag_divider = 0;
+
+    if (!aux_read_mag(b)) {
+        return;
+    }
+    if ((b[8] & 0x08) != 0) {          // ST2 HOFL, magnetic overflow
+        return;
+    }
+
+    const int16_t mx = (int16_t)((uint16_t)b[2] << 8 | b[1]);
+    const int16_t my = (int16_t)((uint16_t)b[4] << 8 | b[3]);
+    const int16_t mz = (int16_t)((uint16_t)b[6] << 8 | b[5]);
+
+    if (mx == 0 && my == 0 && mz == 0) {
+        return;
+    }
+
+    _mag_field = Vector3f((float)mx, (float)my, (float)mz);
+    _mag_counter++;
+    _mag_ok = true;
+}
+
+/*
+  Report whether the AK09916 answers on the auxiliary bus.
+
+  Reads BOTH identity registers rather than one: WIA1 is a fixed company code
+  and WIA2 the device code, so a part that answers one but not the other is a
+  different device rather than a bus fault -- the same reasoning that settled
+  Q-05 on the barometer.
+*/
+void AP_InertialSensor_ICM20948_K3::aux_probe_ak09916()
+{
+    uint8_t wia1 = 0, wia2 = 0;
+
+    if (!aux_master_init()) {
+        trace_printf("AP-K3: mag: aux I2C master init FAILED\n");
+        return;
+    }
+
+    const bool ok1 = aux_read(AK09916_I2C_ADDR, AK09916_REG_WIA1, wia1);
+    const bool ok2 = aux_read(AK09916_I2C_ADDR, AK09916_REG_WIA2, wia2);
+
+    trace_printf("AP-K3: mag: ak09916 probe xfer=%u/%u wia1=%x (want 48) wia2=%x (want 09)\n",
+                 (uint32_t)ok1, (uint32_t)ok2, (uint32_t)wia1, (uint32_t)wia2);
+
+    if (ok1 && ok2 && wia1 == AK09916_WIA1_VAL && wia2 == AK09916_WIA2_VAL) {
+        trace_printf("AP-K3: mag: AK09916 PRESENT on aux bus at 0x0c\n");
+
+        if (!aux_start_ak09916()) {
+            trace_printf("AP-K3: mag: continuous-mode start FAILED\n");
+            return;
+        }
+        hal.scheduler->delay(50);
+
+        /*
+          Two samples, spaced. Field values that are plausible AND move between
+          reads prove the whole path: SLV0 is cycling, ST2 is being read so the
+          part is not latched, and the block is not a stale snapshot. A single
+          reading cannot distinguish live data from one frozen sample -- which
+          is exactly how the barometer looked healthy while it was dead.
+        */
+        for (uint8_t i = 0; i < 2; i++) {
+            uint8_t b[AK09916_BLOCK_LEN] = {};
+            if (!aux_read_mag(b)) {
+                trace_printf("AP-K3: mag: block read FAILED\n");
+                return;
+            }
+            const int16_t mx = (int16_t)((uint16_t)b[2] << 8 | b[1]);
+            const int16_t my = (int16_t)((uint16_t)b[4] << 8 | b[3]);
+            const int16_t mz = (int16_t)((uint16_t)b[6] << 8 | b[5]);
+            trace_printf("AP-K3: mag: st1=%x x=%d y=%d z=%d st2=%x (%d,%d,%d mGauss)\n",
+                         (uint32_t)b[0], (int32_t)mx, (int32_t)my, (int32_t)mz,
+                         (uint32_t)b[8],
+                         (int32_t)(mx * 3 / 2), (int32_t)(my * 3 / 2),
+                         (int32_t)(mz * 3 / 2));
+            hal.scheduler->delay(100);
+        }
+    } else {
+        trace_printf("AP-K3: mag: AK09916 not identified. Both zero means the aux "
+                     "master is not running; NACK means nothing answers at 0x0c\n");
+    }
 }
 
 bool AP_InertialSensor_ICM20948_K3::select_bank(uint8_t bank)
@@ -235,6 +578,15 @@ void AP_InertialSensor_ICM20948_K3::start()
         SAMPLE_PERIOD_US,
         FUNCTOR_BIND_MEMBER(&AP_InertialSensor_ICM20948_K3::sample, void));
 
+    /*
+      Probe the magnetometer die once the IMU itself is configured and
+      sampling. Reports only -- no compass backend is registered yet (T16) --
+      but it proves the auxiliary I2C path end to end, which is the part of
+      that work that could not be done any other way.
+    */
+    _singleton = this;
+    aux_probe_ak09916();
+
     trace_printf("AP-K3: ins20948: started, gyro inst %u accel inst %u\n",
                  (uint32_t)_gyro_instance, (uint32_t)_accel_instance);
 }
@@ -317,6 +669,9 @@ void AP_InertialSensor_ICM20948_K3::sample()
       (raw accel Z reads -1g with the board flat and upright), the unrotated
       output put Z at +990 mg and parked the AHRS at 177 degrees of roll.
     */
+    // Magnetometer rides the same bus and the same cadence; see mag_sample().
+    mag_sample();
+
     _rotate_and_correct_accel(_accel_instance, accel);
     _rotate_and_correct_gyro(_gyro_instance, gyro);
 

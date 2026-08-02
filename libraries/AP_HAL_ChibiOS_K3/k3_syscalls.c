@@ -26,23 +26,49 @@
 extern char __heap_base__;
 extern char __heap_end__;
 
+/* File scope so k3_heap_remaining() can report against it. */
+static char *k3_heap_break = 0;
+
 void *_sbrk(ptrdiff_t incr)
 {
-    static char *heap = 0;
     char *prev;
     char *next;
 
-    if (heap == 0) {
-        heap = &__heap_base__;
+    if (k3_heap_break == 0) {
+        k3_heap_break = &__heap_base__;
     }
+    char *heap = k3_heap_break;
     prev = heap;
     next = heap + incr;
     if (next > &__heap_end__) {
         errno = ENOMEM;
         return (void *)-1;
     }
-    heap = next;
+    k3_heap_break = next;
     return prev;
+}
+
+/*
+  Bytes left in the sbrk arena.
+
+  ArduPilot asks via Util::available_memory(), and the answer gates real
+  behaviour rather than being informational: AP_NavEKF3 refuses to start unless
+  it can see sizeof(NavEKF3_core)*cores + 4096 bytes free. AP_HAL::Util's base
+  implementation returns a hardcoded 4096, so any port that does not override
+  it disables EKF3 outright regardless of how much memory the board has. That
+  is what kept EKF3 off this board until 2026-08-02, on 14 MB of DDR.
+
+  Reports the unhanded-out remainder rather than the largest free block:
+  nothing here ever frees back to sbrk, so the two are identical and the
+  simpler answer cannot drift out of step with the allocator.
+*/
+size_t k3_heap_remaining(void)
+{
+    const char *cur = (k3_heap_break == 0) ? &__heap_base__ : k3_heap_break;
+    if (cur >= &__heap_end__) {
+        return 0;
+    }
+    return (size_t)(&__heap_end__ - cur);
 }
 
 int _write(int file, char *ptr, int len)
