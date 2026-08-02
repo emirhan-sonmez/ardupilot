@@ -115,6 +115,12 @@ AP_InertialSensor_ICM20948_K3::AP_InertialSensor_ICM20948_K3(
         AP_HAL::OwnPtr<AP_HAL::SPIDevice> dev,
         enum Rotation rotation)
     : AP_InertialSensor_Backend(imu)
+    /* Order must match the declaration order in the header, not logical
+       grouping -- the magnetometer members are declared before _dev. */
+    , _mag_field(0.0f, 0.0f, 0.0f)
+    , _mag_counter(0)
+    , _mag_ok(false)
+    , _mag_divider(0)
     , _dev(std::move(dev))
     , _rotation(rotation)
     , _gyro_instance(0)
@@ -383,6 +389,7 @@ void AP_InertialSensor_ICM20948_K3::mag_sample()
     _mag_field = Vector3f((float)mx, (float)my, (float)mz);
     _mag_counter++;
     _mag_ok = true;
+
 }
 
 /*
