@@ -282,14 +282,43 @@ void AP_InertialSensor_ICM20948_K3::sample()
     const int16_t gy = (int16_t)((uint16_t)raw[8] << 8 | raw[9]);
     const int16_t gz = (int16_t)((uint16_t)raw[10] << 8 | raw[11]);
 
-    // Z is negated to match the Invensense convention ArduPilot's rotation
-    // tables are written against.
-    Vector3f accel((float)ax * ACCEL_SCALE,
-                   (float)ay * ACCEL_SCALE,
+    /*
+      Swap X and Y, and negate Z. Both halves are required and this must match
+      AP_InertialSensor_Invensensev2 exactly, because the rotation constants in
+      ArduPilot's tables -- including the one this board inherits from the
+      ArduPilot Linux hwdef -- are written against that driver's output frame.
+
+      Negating Z alone, as this did until 2026-08-02, is diag(1,1,-1): a
+      determinant of -1, so a REFLECTION rather than a rotation. It yields a
+      left-handed frame that no ROTATION_* value can correct, because rotations
+      cannot undo a reflection. The stock mapping (Y, X, -Z) has determinant
+      +1 and is a proper rotation.
+
+      Symptom it caused: a level, upright board reported accel Z = +990 mg
+      instead of -1000 mg, and the AHRS held roll at 178 degrees.
+    */
+    Vector3f accel((float)ay * ACCEL_SCALE,
+                   (float)ax * ACCEL_SCALE,
                    -(float)az * ACCEL_SCALE);
-    Vector3f gyro((float)gx * GYRO_SCALE,
-                  (float)gy * GYRO_SCALE,
+    Vector3f gyro((float)gy * GYRO_SCALE,
+                  (float)gx * GYRO_SCALE,
                   -(float)gz * GYRO_SCALE);
+
+    /*
+      Apply the board rotation and the calibration offsets/scales.
+
+      set_accel_orientation() only RECORDS the rotation for the frontend; it
+      does not apply it. Every stock backend calls _rotate_and_correct_*()
+      explicitly before notifying, and omitting it here meant the board
+      rotation was silently ignored for the life of this driver -- changing
+      the constant passed to probe() had no effect whatsoever.
+
+      Measured consequence: with the ICM-20948 mounted inverted on this PCB
+      (raw accel Z reads -1g with the board flat and upright), the unrotated
+      output put Z at +990 mg and parked the AHRS at 177 degrees of roll.
+    */
+    _rotate_and_correct_accel(_accel_instance, accel);
+    _rotate_and_correct_gyro(_gyro_instance, gyro);
 
     const uint64_t now_us = AP_HAL::micros64();
     _notify_new_accel_raw_sample(_accel_instance, accel, now_us);

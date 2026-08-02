@@ -1379,6 +1379,20 @@ AP_InertialSensor::detect_backends(void)
       See that class's header for why -- in short, Invensensev2 reads the FIFO
       in blocks and block reads silently corrupt on this bus (Q-35).
     */
+    /*
+      ROTATION_ROLL_180_YAW_90, as the ArduPilot Linux hwdef lists.
+
+      Confirmed on hardware 2026-08-02 rather than inherited on trust: with the
+      board flat and upright the ICM-20948 reads raw accel Z = -1g, so the part
+      really is mounted inverted and the 180-degree roll is real. An earlier
+      attempt to remove it was chasing a different bug -- the backend never
+      called _rotate_and_correct_*(), so no rotation of any value was being
+      applied and the constant here was inert.
+
+      The YAW_90 component remains UNVERIFIED: it only affects heading
+      alignment, which cannot be checked until the AK09916 magnetometer has a
+      backend (T16).
+    */
     ADD_BACKEND(AP_InertialSensor_ICM20948_K3::probe(
                     *this, hal.spi->get_device("icm20948"),
                     ROTATION_ROLL_180_YAW_90));
