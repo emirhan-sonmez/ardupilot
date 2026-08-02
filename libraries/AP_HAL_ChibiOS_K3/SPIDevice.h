@@ -122,4 +122,9 @@ public:
       Safe to call when the part is absent: reports and returns.
     */
     void selftest();
+
+    // TEMP-DIAG(Q-35): SPI read-length instability sweep over the AP_HAL path.
+    // Safe to call mid-run -- takes the bus semaphore per transaction.
+    // REMOVE-AFTER: Q-35 closed.
+    void bus_length_diag();
 };

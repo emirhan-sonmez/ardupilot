@@ -62,6 +62,10 @@
 #define IMU_BUS_DIAG_ENABLED 0
 #endif
 
+/* IMU_BUS_DIAG_LENSWEEP is defined in bench_imu.h -- the main loop needs it
+   too. See there for why it is separate from IMU_BUS_DIAG_ENABLED. */
+#define IMU_BUS_DIAG_ANY (IMU_BUS_DIAG_ENABLED || IMU_BUS_DIAG_LENSWEEP)
+
 /*
   TEMP-DIAG(Q-35): split the 14-byte sample burst into 14 single-register
   reads. Set to 0 to get the burst back for comparison without reverting code.
@@ -556,7 +560,7 @@ bool imu_try_bringup()
     return true;
 }
 
-#if IMU_BUS_DIAG_ENABLED
+#if IMU_BUS_DIAG_ANY
 /*
   TEMP-DIAG(Q-35): per-bit-position error characterisation of the SPI read and
   write paths.
@@ -890,6 +894,7 @@ void diag_stuck_mask()
                  (uint32_t)first[3], (uint32_t)first[4]);
 }
 
+#if IMU_BUS_DIAG_ENABLED
 void diag_at_speed(uint32_t speed_hz)
 {
     if (spi_started) {
@@ -965,6 +970,30 @@ void bus_diag_sweep()
 }
 #endif  // IMU_BUS_DIAG_ENABLED
 
+/*
+  TEMP-DIAG(Q-35): read-only A/B for the RX-drain fix.
+
+  Deliberately does not call diag_at_speed(): no spiStop/spiStart, no speed
+  change, no register writes. It reads the part as bring-up left it, so the
+  numbers are comparable across boots and the measurement cannot manufacture
+  the fault it is looking for.
+
+  Reading: len 1-2 have always been STABLE. The question is len 4, 6, 8 and 14.
+  A count near 128/256 is the alternating stale-RX shift; 0 means the drain
+  fixed it; a scattered count means something electrical is left underneath.
+  REMOVE-AFTER: Q-35 closed.
+*/
+void bus_diag_lensweep()
+{
+    trace_printf("AP-K3: imu-diag lensweep-only, speed as brought up, n=%u\n",
+                 (uint32_t)DIAG_READS);
+    diag_dump_ctrl("lensweep");
+    diag_stuck_mask();
+    diag_single_byte(DIAG_READS);
+    diag_length_sweep(0x00);
+}
+#endif  // IMU_BUS_DIAG_ANY
+
 }  // namespace
 
 void ChibiOS_K3::bench_imu_init()
@@ -978,6 +1007,99 @@ void ChibiOS_K3::bench_imu_init()
     if (imu_present) {
         bus_diag_sweep();
         imu_present = imu_try_bringup();
+    } else {
+        trace_printf("AP-K3: imu-diag skipped, bring-up failed\n");
+    }
+#elif IMU_BUS_DIAG_LENSWEEP
+    /* TEMP-DIAG(Q-35): read-only, ~2 s, no re-bring-up needed afterwards
+       because nothing here changes the bus or the part.
+       REMOVE-AFTER: Q-35 closed. */
+    if (imu_present) {
+        bus_diag_lensweep();
+    } else {
+        trace_printf("AP-K3: imu-diag skipped, bring-up failed\n");
+    }
+#endif
+}
+
+/*
+  Blocks until MCU_MCSPI0 is actually ours, or the timeout expires.
+
+  remoteproc starts this core during the kernel's own boot, long before Linux
+  userspace runs gemstone-r5f-setup.service and unbinds omap2_mcspi from
+  4b00000.spi. Until that unbind lands, two masters drive the bus and every
+  read answers 0x00.
+
+  RCOutput::retry_pending() (DR-006) survives the same race by retrying
+  forever, because a PWM channel can be enabled at any later time.
+  AP_InertialSensor cannot: detect_backends() runs once inside setup(), and a
+  probe that reads 0x00 sets backend_count=0 permanently -- the vehicle then
+  falls back to software timing for the rest of the run with no way back. So
+  the bus has to be ours BEFORE setup(), not merely eventually.
+
+  Measured 2026-08-02: on a cold power cycle the probe at t=30s succeeds while
+  the one during setup() fails, which is the entire difference between an INS
+  backend and no INS backend.
+
+  Bounded on purpose. If Linux never releases the bus, booting late with no
+  IMU beats not booting at all, and the timeout is traced loudly rather than
+  passed over. WHO_AM_I only -- no reset, no configuration, nothing written --
+  both because the part belongs to the backend and because writing to a bus
+  someone else is driving is how this port lost a session already.
+*/
+void ChibiOS_K3::wait_for_imu_bus(uint32_t timeout_ms)
+{
+    constexpr uint32_t POLL_MS = 250;
+    const uint32_t start = AP_HAL::millis();
+    uint32_t polls = 0;
+    uint8_t who = 0;
+
+    am67_spi0_imu_enable();
+
+    while ((AP_HAL::millis() - start) < timeout_ms) {
+        polls++;
+        spiStart(&SPID1, &spicfg);
+        spi_started = true;
+
+        if (SPID1.ready) {
+            xfer_failed = false;
+            /* WHO_AM_I is bank-independent, so this needs no bank select and
+               therefore writes nothing. */
+            who = read_reg(REG_WHO_AM_I);
+            if (!xfer_failed && (who == WHO_AM_I_VAL)) {
+                trace_printf("AP-K3: imu bus released after %u ms (%u polls), WHO_AM_I=%x\n",
+                             (uint32_t)(AP_HAL::millis() - start),
+                             polls, (uint32_t)who);
+                return;
+            }
+        }
+        chThdSleepMilliseconds(POLL_MS);
+    }
+
+    trace_printf("AP-K3: imu bus STILL NOT OURS after %u ms (%u polls, last WHO_AM_I=%x). "
+                 "Is 4b00000.spi unbound? Booting without an INS backend.\n",
+                 timeout_ms, polls, (uint32_t)who);
+}
+
+/*
+  TEMP-DIAG(Q-35): the length sweep when the real AP_InertialSensor backend
+  owns CS3, which is the only configuration that now ships.
+
+  Safe here and nowhere else. The caller runs this before callbacks->setup(),
+  so the backend exists but its periodic callback has not been registered yet
+  and nothing else is on the bus -- the interleaving that bench_imu_init()
+  refuses to risk cannot happen at this point in the boot.
+
+  Deliberately leaves imu_present false. That keeps bench_imu_update() a no-op
+  for the rest of the run, so this never becomes a second master competing
+  with the backend once the vehicle is looping.
+  REMOVE-AFTER: Q-35 closed.
+*/
+void ChibiOS_K3::bench_imu_bus_diag()
+{
+#if IMU_BUS_DIAG_LENSWEEP
+    if (imu_try_bringup()) {
+        bus_diag_lensweep();
     } else {
         trace_printf("AP-K3: imu-diag skipped, bring-up failed\n");
     }

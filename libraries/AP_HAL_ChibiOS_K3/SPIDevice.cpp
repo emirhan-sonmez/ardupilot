@@ -386,4 +386,137 @@ void SPIDeviceManager::selftest()
     delete dev;
 }
 
+/*
+  TEMP-DIAG(Q-35): read-length characterisation over the AP_HAL path.
+
+  Runs here rather than in bench_imu.cpp because that file drives SPID1
+  directly and can only run before setup(), which on this board is before
+  Linux has unbound omap2_mcspi -- bring-up simply fails that early. Going
+  through AP_HAL::SPIDevice means the bus semaphore is held per transaction,
+  so this is safe to call at any point in the run, alongside the INS backend.
+
+  Reports instability, not correctness: min(ones, reads-ones) per bit position
+  is nonzero only when the reads disagree with each other, so no knowledge of
+  the true register contents is needed. Baseline recorded 2026-07-31 was len
+  1-2 stable and len 4+ unstable at ~128/256 -- exact alternation, which is
+  the signature of a stale word shifting the transaction rather than of
+  electrical marginality.
+  REMOVE-AFTER: Q-35 closed.
+*/
+void SPIDeviceManager::bus_length_diag()
+{
+    static const uint8_t lengths[] = { 1, 2, 4, 6, 8, 14 };
+    constexpr uint8_t num_lengths = 6;
+    constexpr uint16_t reads = 256;
+    constexpr uint8_t max_len = 14;
+
+    AP_HAL::SPIDevice *dev = get_device_ptr("icm20948");
+    if (dev == nullptr) {
+        trace_printf("spi: lendiag SKIPPED, no icm20948 device\n");
+        return;
+    }
+    dev->set_read_flag(0x80);
+
+    /*
+      Correctness gate. This sweep reports *instability* -- min(ones, reads-ones)
+      per bit -- which is 0 for constant data of any value. A part that answers
+      0x00 to everything therefore scores a perfect STABLE on every length while
+      measuring nothing at all, which is exactly what the first run of this
+      diagnostic did. Refuse to report numbers unless the part is talking.
+    */
+    uint8_t who = 0;
+    {
+        WITH_SEMAPHORE(dev->get_semaphore());
+        (void)dev->read_registers(0x00, &who, 1);
+    }
+    if (who != 0xEA) {
+        trace_printf("spi: lendiag ABORT, WHO_AM_I=%x expected ea "
+                     "-- part not responding, any STABLE result here is a lie\n",
+                     (uint32_t)who);
+        delete dev;
+        return;
+    }
+
+    /* Sample of real bytes, so the trace shows what is being measured rather
+       than only how stable it is. */
+    {
+        uint8_t s[8] = {};
+        WITH_SEMAPHORE(dev->get_semaphore());
+        if (dev->read_registers(0x00, s, 8)) {
+            trace_printf("spi: lendiag sample o0..o7=%x,%x,%x,%x,%x,%x,%x,%x\n",
+                         (uint32_t)s[0], (uint32_t)s[1], (uint32_t)s[2],
+                         (uint32_t)s[3], (uint32_t)s[4], (uint32_t)s[5],
+                         (uint32_t)s[6], (uint32_t)s[7]);
+        }
+    }
+
+    trace_printf("spi: lendiag start n=%u via AP_HAL path\n", (uint32_t)reads);
+
+    for (uint8_t li = 0; li < num_lengths; li++) {
+        const uint8_t len = lengths[li];
+        uint16_t ones[max_len][8] = {};
+        uint32_t total = 0;
+        uint16_t worst = 0;
+        uint8_t worst_bit = 0, worst_off = 0;
+        uint16_t failed = 0;
+        uint16_t anchor_errs = 0;
+
+        for (uint16_t i = 0; i < reads; i++) {
+            uint8_t buf[max_len] = {};
+            bool ok;
+            {
+                WITH_SEMAPHORE(dev->get_semaphore());
+                ok = dev->read_registers(0x00, buf, len);
+            }
+            if (!ok) {
+                failed++;
+                continue;
+            }
+            /*
+              Correctness anchor. Offset 0 is WHO_AM_I, a read-only constant
+              0xEA, so every burst carries its own answer key. Instability
+              alone cannot see a burst that is uniformly shifted by a stale
+              word -- the shifted data is perfectly self-consistent across
+              reads -- but the anchor lands on the wrong byte the moment a
+              shift happens, which is exactly the fault the RX drain targets.
+            */
+            if (buf[0] != 0xEA) {
+                anchor_errs++;
+            }
+            for (uint8_t o = 0; o < len; o++) {
+                for (uint8_t b = 0; b < 8; b++) {
+                    if ((buf[o] >> b) & 1U) {
+                        ones[o][b]++;
+                    }
+                }
+            }
+        }
+
+        const uint16_t good = (uint16_t)(reads - failed);
+        for (uint8_t o = 0; o < len; o++) {
+            for (uint8_t b = 0; b < 8; b++) {
+                const uint16_t n1 = ones[o][b];
+                const uint16_t n0 = (uint16_t)(good - n1);
+                const uint16_t minority = (n1 > n0) ? n0 : n1;
+                total += minority;
+                if (minority > worst) {
+                    worst = minority;
+                    worst_bit = b;
+                    worst_off = o;
+                }
+            }
+        }
+
+        trace_printf("spi: lendiag len=%u unstable=%u worst=b%u@o%u(%u/%u) xferfail=%u anchor=%u %s\n",
+                     (uint32_t)len, (uint32_t)total,
+                     (uint32_t)worst_bit, (uint32_t)worst_off,
+                     (uint32_t)worst, (uint32_t)good, (uint32_t)failed,
+                     (uint32_t)anchor_errs,
+                     ((total == 0) && (anchor_errs == 0)) ? "STABLE" : "SUSPECT");
+    }
+
+    trace_printf("spi: lendiag done\n");
+    delete dev;
+}
+
 #endif  // CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
