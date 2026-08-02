@@ -1476,25 +1476,21 @@ class GemstoneO1R5F(Board):
             # attaches to whatever it is named after and never talks to the
             # part -- a label, not evidence. Closes Q-05.
             HAL_GEMSTONE_BARO_LPS22DF = 1,
-            # EKF3 compiled out until the R5F data cache is enabled.
+            # EKF3 re-enabled 2026-08-02 once the R5F data cache was working.
             #
-            # Not a memory problem -- that was fixed by overriding
-            # Util::available_memory(), which had been returning AP_HAL's
-            # hardcoded 4096 and silently disabling EKF3 on a board with 14 MB
-            # of DDR. Once EKF3 actually started, it cost ~6 ms per loop
-            # iteration: the main loop fell from 100 Hz to 80 Hz, dtmax went
-            # 13 -> 19 ms against a 12.5 ms budget, and telemetry starved to
-            # ~60 B/s. The R5F stayed healthy throughout (tx_refused=0, loops
-            # climbing) but could not emit heartbeats reliably, so QGC never
-            # finished its parameter download and reported Comms Lost.
+            # It was compiled out earlier the same day because it cost ~6 ms
+            # per loop iteration and starved telemetry until QGC dropped the
+            # link. That was never a memory problem -- Util::available_memory()
+            # had been returning AP_HAL's hardcoded 4096 and silently
+            # disabling EKF3 on a board with 14 MB of DDR -- nor an EKF3
+            # problem. SCTLR_C was simply never set, so every access to its
+            # covariance matrices ran at DDR latency. With the cache enabled
+            # and region 3 made non-shareable, dtmax fell 31 -> 21 ms and the
+            # gyro rate cleared ArduPilot's loop-rate check.
             #
-            # The underlying cause is that SCTLR_C is never set in board.c, so
-            # every data access runs at DDR latency -- brutal for EKF3's float
-            # matrix code even with hard-float VFP enabled. Turn this back on
-            # once the data cache is working; EKF3 is wanted, it is simply
-            # unaffordable right now. AHRS falls back to DCM, which is what
-            # produced the attitude verified on hardware 2026-08-02.
-            HAL_NAVEKF3_AVAILABLE = 0,
+            # If the main loop cannot hold its rate with this on, measure
+            # before reverting: dtmax and the gyro rate say whether EKF3 is
+            # genuinely unaffordable or something else regressed.
             # M2: SERIAL0 (the only wired UART -- SD1/AM67 UART1, header pins
             # 8 TX / 10 RX) is the first MAVLink transport. MAVLink2 at these
             # values is already AP_SerialManager's compiled-in default when
