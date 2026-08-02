@@ -1455,6 +1455,18 @@ class GemstoneO1R5F(Board):
             # silently corrupt one bit per transaction (Q-35, measured
             # 2026-07-31). GemstoneO1R5F-only, like the define above.
             HAL_GEMSTONE_INS_ICM20948 = 1,
+            # How long setup() waits for Linux to unbind omap2_mcspi before
+            # giving up and booting without an INS. remoteproc starts this
+            # core during the kernel's own boot, so on a cold power cycle the
+            # bus is still Linux's when AP_InertialSensor probes -- and that
+            # probe happens exactly once. Measured 2026-08-02: the probe
+            # inside setup() reads 0x00 and yields backend_count==0, while
+            # the same probe at t=30s succeeds. Without this wait there is no
+            # INS backend on any cold boot, which is the only boot type
+            # available while Q-06 and Q-39 are open. 60s is generous on
+            # purpose: overshooting costs boot time on the bench, undershooting
+            # silently costs the whole INS for the run.
+            HAL_GEMSTONE_IMU_BUS_WAIT_MS = 60000,
             # M2: SERIAL0 (the only wired UART -- SD1/AM67 UART1, header pins
             # 8 TX / 10 RX) is the first MAVLink transport. MAVLink2 at these
             # values is already AP_SerialManager's compiled-in default when

@@ -25,6 +25,7 @@
 #include "RCOutput.h"
 #include "RCInput.h"
 #include "SPIDevice.h"
+#include "Storage.h"
 #include "bench_passthrough.h"
 #include "bench_imu.h"
 #include <AP_RCProtocol/AP_RCProtocol.h>   // AP::RC(), for the rc health line
@@ -75,7 +76,10 @@ static Empty::I2CDeviceManager i2cDeviceManager;
 static ChibiOS_K3::SPIDeviceManager spiDeviceManager;
 static Empty::WSPIDeviceManager wspiDeviceManager;
 static Empty::AnalogIn analogIn;
-static Empty::Storage storageDriver;
+/* M4: real persistent storage over the shared-memory window (Storage.cpp).
+   Empty::Storage read back zeros and discarded every write, so parameters
+   appeared to save and silently did not. */
+static ChibiOS_K3::Storage storageDriver;
 static Empty::GPIO gpioDriver;
 static ChibiOS_K3::RCInput rcinDriver((void *)&SD1);   // real: iBus on SD1 RX, pin 10
 static ChibiOS_K3::RCOutput rcoutDriver;   // real: channel 0 -> EPWM0_A -> pin 29
@@ -115,14 +119,17 @@ HAL_ChibiOS_K3::HAL_ChibiOS_K3() :
 /*
   Inbound remoteproc mailbox messages from Linux. ISR context, must not block.
 
-  SAFETY, AND THE ORDERING IS NOT NEGOTIABLE: the kernel asserts this core's
-  reset as soon as it receives the ack, and a stopped R5F leaves the PWM
-  peripherals emitting their last commanded pulse width indefinitely (Safety
-  and Failsafes 3.1). There is no watchdog -- M9 is open and the device tree
-  exposes no watchdog device at all -- so nothing downstream will catch it.
-  Acking before parking the outputs would convert "stop" into "latch the
-  current throttle forever", which is strictly worse than the timeout this
-  replaces. Park first, ack second.
+  SAFETY, AND THE ORDERING IS NOT NEGOTIABLE: park the outputs first, ack
+  second. A stopped R5F leaves the PWM peripherals emitting their last
+  commanded pulse width indefinitely (Safety and Failsafes 3.1), and there is
+  no watchdog -- M9 is open and the device tree exposes no watchdog device at
+  all -- so nothing downstream will catch it.
+
+  Today the kernel's reset assert fails (Q-06) and the core keeps running, so
+  parking is what actually happens rather than a race against reset. Keep it
+  that way regardless: a shutdown request is a request for a safe output state,
+  whether or not the stop that follows succeeds, and the ordering must already
+  be correct on the day the reset starts working.
 */
 static bool mailbox_message(uint32_t msg)
 {
@@ -134,7 +141,7 @@ static bool mailbox_message(uint32_t msg)
            (see below) and trace_printf can compact the 16 KiB buffer, which is
            an interrupts-off bulk copy of uncached DDR -- easily enough to blow
            it. Nothing after the ack may be slow. */
-        trace_printf("AP-K3: mbox SHUTDOWN -> outputs parked, halting\n");
+        trace_printf("AP-K3: mbox SHUTDOWN -> outputs parked, ack sent\n");
 
         /* Deliberately unchecked: if the TX FIFO is full the stop simply times
            out as it did before this existed. There is no useful recovery from
@@ -142,23 +149,16 @@ static bool mailbox_message(uint32_t msg)
            matters worse. */
         (void)mailbox_send(RP_MBOX_SHUTDOWN_ACK);
 
-        /* The ack alone is not enough. k3_r5_rproc_stop() then polls
-           is_core_in_wfi() against a ~2ms deadline and fails -ETIMEDOUT if the
-           core is still executing -- which is exactly what happened the first
-           time this ran: the kernel logged "received shutdown_ack" and still
-           returned -110, because we acked and carried on running.
+        /* We ack and keep running, on purpose. k3_r5_rproc_stop() then polls
+           is_core_in_wfi() against a ~2ms deadline and returns -ETIMEDOUT, so
+           `stop` still fails -- but it fails in ~7ms instead of blocking 25s
+           waiting for an ack that never comes, and the firmware survives it.
 
-           So stop here, permanently. Mask IRQ and FIQ, then WFI in a loop: on
-           ARMv7-R a masked interrupt still wakes WFI, so a bare WFI would fall
-           through on the next systick and drop the core back out of standby
-           before the kernel sampled it.
-
-           No return path by design. The kernel asserts this core's reset
-           moments later; the only way back is a fresh firmware load. */
-        __asm__ volatile ("cpsid if" ::: "memory");
-        for (;;) {
-            __asm__ volatile ("wfi");
-        }
+           Halting in WFI here does make `stop` return 0, but `start` cannot
+           bring the core back: TI SCI refuses this core's module reset in both
+           directions with -ENODEV (Q-06). So halting trades a failed stop for a
+           dead core that needs a power cycle, which is strictly worse. Do not
+           reintroduce the halt until the reset refusal is solved. */
         break;
 
     case RP_MBOX_ECHO_REQUEST:
@@ -215,6 +215,18 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
        Linux bridge that had already attached. begin() is idempotent for
        exactly this reason. */
     ipc_ring_init();
+
+    /* M4. Nothing in ArduPilot's generic path calls hal.storage->init():
+       AP_HAL_ChibiOS gets away with that by opening storage lazily inside
+       read_block()/write_block(). This backend needs a real init, because it
+       has to wait for the Linux daemon to publish the image before AP_Param
+       reads it -- a read that lands early returns zeros, which ArduPilot
+       cannot distinguish from a blank EEPROM, so it would format the store
+       and write defaults over the saved parameters.
+
+       Must therefore run before callbacks->setup(), and before anything else
+       touches a parameter. */
+    storageDriver.init();
 
     /* AP_BoardConfig::board_setup() would normally call hal.rcin->init() (and
        gpio/rcout) but that path is gated to `#if CONFIG_HAL_BOARD ==
@@ -279,6 +291,13 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
     */
 #if HAL_GEMSTONE_INS_ICM20948
     trace_printf("AP-K3: bench_imu skipped, AP_InertialSensor backend owns CS3\n");
+
+    /* The INS probe below gets exactly one attempt, and on a cold power cycle
+       the bus is still Linux's when setup() runs. Wait for the unbind first --
+       see wait_for_imu_bus(). Delays boot by however long userspace takes to
+       reach gemstone-r5f-setup.service; PWM outputs hold their disarmed idle
+       throughout, and there are no propellers on this airframe yet. */
+    ChibiOS_K3::wait_for_imu_bus(HAL_GEMSTONE_IMU_BUS_WAIT_MS);
 #else
     ChibiOS_K3::bench_imu_init();
 #endif
@@ -365,6 +384,30 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
         // compiled out entirely when the real backend owns the bus.
 #if !HAL_GEMSTONE_INS_ICM20948
         ChibiOS_K3::bench_imu_update();
+#endif
+
+#if IMU_BUS_DIAG_LENSWEEP
+        /* TEMP-DIAG(Q-35): one shot, 30 s in. Deliberately not at boot: the
+           R5F is started by remoteproc before Linux userspace unbinds
+           omap2_mcspi, so anything touching the bus that early fails against
+           a controller Linux still owns. By 30 s the unbind has long since
+           run and the INS backend is settled, and the sweep takes the bus
+           semaphore per transaction so the two cannot interleave.
+           Costs a large one-off dtmax spike. PROPELLERS OFF.
+           REMOVE-AFTER: Q-35 closed. */
+        static bool lendiag_done;
+        if (!lendiag_done && (AP_HAL::millis() > 30000U)) {
+            lendiag_done = true;
+            /* AP_HAL path only. An earlier revision also called
+               bench_imu_bus_diag() here to bring the part up first, which was
+               correct only while the INS probe was failing and nothing owned
+               CS3. Now that wait_for_imu_bus() lets the backend attach, that
+               call reset the part underneath a live backend and drove SPID1
+               with no bus lock -- two masters on one chip select, measured as
+               27/256 reads returning 0x00. bus_length_diag() takes the bus
+               semaphore per transaction and needs no bring-up of its own. */
+            spiDeviceManager.bus_length_diag();
+        }
 #endif
 
         // SD1 TX carries nothing since MAVLink moved to the rings (DR-016),
