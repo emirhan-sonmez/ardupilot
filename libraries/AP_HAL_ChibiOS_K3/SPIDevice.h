@@ -123,6 +123,10 @@ public:
     */
     void selftest();
 
+    // Q-05: report which barometer is actually fitted on CS1. The device tree
+    // says BMP390 and the board spec says LPS22DFTR; neither is a probe.
+    void baro_ident();
+
     // TEMP-DIAG(Q-35): SPI read-length instability sweep over the AP_HAL path.
     // Safe to call mid-run -- takes the bus semaphore per transaction.
     // REMOVE-AFTER: Q-35 closed.

@@ -25,6 +25,27 @@ extern const AP_HAL::HAL &hal;
 // WHOAMI values
 #define LPS22HB_WHOAMI 0xB1
 #define LPS25HB_WHOAMI 0xBD
+#define LPS22DF_WHOAMI 0xB4
+
+/*
+  LPS22DF. Same data path as the LPS22HB -- STATUS 0x27, PRESS_OUT 0x28..0x2A
+  at 4096 LSB/hPa, TEMP_OUT 0x2B..0x2C at 100 LSB/degC -- so _timer(),
+  _update_pressure() and _update_temperature() need no change. The CONTROL
+  registers differ and are not interchangeable:
+
+    CTRL_REG1 (0x10)  avg[2:0] bits 0-2, odr[3:0] bits 3-6
+    CTRL_REG2 (0x11)  oneshot 0, swreset 2, BDU 3, en_lpfp 4, lfpf_cfg 5, boot 7
+
+  Note BDU is in CTRL_REG2 here, where the LPS22HB has it in CTRL_REG1. Bit
+  positions taken from STMicroelectronics' own lps22df_reg.h rather than from
+  prose, because a misplaced BDU produces torn readings that look like sensor
+  noise instead of a driver bug.
+*/
+#define LPS22DF_CTRL_REG1          0x10
+#define LPS22DF_CTRL_REG2          0x11
+#define LPS22DF_CTRL_REG2_BDU      (1 << 3)
+#define LPS22DF_ODR_50HZ           0x05
+#define LPS22DF_AVG_16             0x02
 
 #define REG_ID                     0x0F
 
@@ -169,6 +190,29 @@ bool AP_Baro_LPS2XH::_init()
         CallTime = 1000000/75;
     }
 
+    if (_lps2xh_type == BARO_LPS22DF) {
+        // Idle first: ODR 0 is one-shot/power-down, so the part is not
+        // converting while the rest of the configuration is written.
+        _dev->write_register(LPS22DF_CTRL_REG1, 0x00);
+
+        // BDU before the rate. Without it the output registers can update
+        // between the XL and H byte reads, and a torn pressure word looks
+        // exactly like the multi-byte SPI corruption this port is already
+        // chasing (Q-35) -- an ambiguity worth designing out.
+        _dev->write_register(LPS22DF_CTRL_REG2, LPS22DF_CTRL_REG2_BDU);
+
+        _dev->write_register(LPS22DF_CTRL_REG1,
+                             (LPS22DF_ODR_50HZ << 3) | LPS22DF_AVG_16);
+
+        /*
+          The I2C/I3C interface is deliberately NOT disabled via IF_CTRL. The
+          part has a dedicated chip select here, and writing a bit whose
+          position has not been verified against the datasheet is how a
+          working sensor gets bricked into silence.
+        */
+        CallTime = 1000000/50;
+    }
+
     _instance = _frontend.register_sensor();
 
     _dev->set_device_type(DEVTYPE_BARO_LPS2XH);
@@ -197,6 +241,9 @@ bool AP_Baro_LPS2XH::_check_whoami(void)
     case LPS25HB_WHOAMI:
         _lps2xh_type = BARO_LPS25H;
         return true;
+    case LPS22DF_WHOAMI:
+        _lps2xh_type = BARO_LPS22DF;
+        return true;
     }
 
     return false;
@@ -206,6 +253,7 @@ bool AP_Baro_LPS2XH::_check_whoami(void)
 void AP_Baro_LPS2XH::_timer(void)
 {
     uint8_t status;
+
     // use status to check if data is available
     if (!_dev->read_registers(STATUS_ADDR, &status, 1)) {
         return;
@@ -249,6 +297,13 @@ void AP_Baro_LPS2XH::_update_temperature(void)
     }
 
     if (_lps2xh_type == BARO_LPS22H) {
+        _temperature = Temp_Reg_s16 * 0.01;
+    }
+
+    // LPS22DF is also 100 LSB/degC, same as the LPS22HB. Omitting this branch
+    // leaves _temperature at 0 while pressure still reports, which reads as a
+    // sensor fault rather than a missing case.
+    if (_lps2xh_type == BARO_LPS22DF) {
         _temperature = Temp_Reg_s16 * 0.01;
     }
 }

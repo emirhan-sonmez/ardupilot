@@ -1467,6 +1467,15 @@ class GemstoneO1R5F(Board):
             # purpose: overshooting costs boot time on the bench, undershooting
             # silently costs the whole INS for the run.
             HAL_GEMSTONE_IMU_BUS_WAIT_MS = 60000,
+            # Onboard barometer on MCU_MCSPI0 CS1. It is an ST LPS22DF, NOT
+            # the Bosch BMP390 named by the ArduPilot Linux hwdef, the
+            # ArduPilot board page, and this board's own device tree. Read
+            # from the ID register on hardware 2026-08-02: WHO_AM_I=0xb4,
+            # while the Bosch CHIP_ID returned 0x00 in the same transaction.
+            # The DT entry `bosch,bmp390-spidev` is a spidev binding, which
+            # attaches to whatever it is named after and never talks to the
+            # part -- a label, not evidence. Closes Q-05.
+            HAL_GEMSTONE_BARO_LPS22DF = 1,
             # M2: SERIAL0 (the only wired UART -- SD1/AM67 UART1, header pins
             # 8 TX / 10 RX) is the first MAVLink transport. MAVLink2 at these
             # values is already AP_SerialManager's compiled-in default when

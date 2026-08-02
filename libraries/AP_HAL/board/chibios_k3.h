@@ -19,6 +19,15 @@
 #define HAL_CPU_CLASS HAL_CPU_CLASS_1000
 #define HAL_MEM_CLASS HAL_MEM_CLASS_1000
 
+/*
+  Onboard barometer: ST LPS22DF on MCU_MCSPI0 CS1, read from the ID register
+  on hardware 2026-08-02 (WHO_AM_I=0xb4). Named devices live in
+  AP_HAL_ChibiOS_K3/SPIDevice.cpp's device_table.
+*/
+#ifndef HAL_GEMSTONE_BARO_NAME
+#define HAL_GEMSTONE_BARO_NAME "lps22df"
+#endif
+
 #ifndef HAL_STORAGE_SIZE
 #define HAL_STORAGE_SIZE            16384
 #endif

@@ -659,6 +659,34 @@ void AP_Baro::init(void)
     return;
 #endif
 
+#if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3 && HAL_GEMSTONE_BARO_LPS22DF
+    /*
+      Onboard barometer on MCU_MCSPI0 CS1. Probed here rather than through a
+      board-type switch for the same reason as the ICM-20948 in
+      AP_InertialSensor.cpp: this HAL has no board table, there is exactly one
+      board, and inventing a table for a single entry would be worse.
+
+      The part is an ST LPS22DF, NOT the Bosch BMP390 that the ArduPilot Linux
+      hwdef, the ArduPilot board page and this board's own device tree all
+      name. Read from the ID register on hardware 2026-08-02: WHO_AM_I=0xb4,
+      while the Bosch CHIP_ID register returned 0x00 in the same transaction.
+      The device tree entry is `bosch,bmp390-spidev` -- a spidev binding, which
+      attaches to whatever it is named after and never talks to the part, so it
+      is a label rather than evidence. Closes Q-05.
+    */
+    {
+        // probe() takes a reference, so the null case must be handled here
+        // rather than inside it -- an absent device would otherwise be a null
+        // dereference at boot instead of a missing backend.
+        AP_HAL::SPIDevice *baro_dev = hal.spi->get_device_ptr(HAL_GEMSTONE_BARO_NAME);
+        if (baro_dev != nullptr) {
+            _add_backend(AP_Baro_LPS2XH::probe(*this, *baro_dev));
+        } else {
+            DEV_PRINTF("Baro: no SPI device named %s\n", HAL_GEMSTONE_BARO_NAME);
+        }
+    }
+#endif
+
 #if defined(HAL_BARO_PROBE_LIST)
     // probe list from BARO lines in hwdef.dat
     HAL_BARO_PROBE_LIST;

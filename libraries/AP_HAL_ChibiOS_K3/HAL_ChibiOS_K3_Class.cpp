@@ -309,6 +309,11 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
        squarely at this layer rather than at the bus. */
     spiDeviceManager.selftest();
 
+    /* Q-05: which barometer is really on CS1. Runs here for the same reason as
+       selftest() -- after the bus wait, before setup(), while nothing else
+       holds the controller. */
+    spiDeviceManager.baro_ident();
+
     trace_printf("AP-K3: entering vehicle setup()\n");
     callbacks->setup();
     trace_printf("AP-K3: setup() returned\n");

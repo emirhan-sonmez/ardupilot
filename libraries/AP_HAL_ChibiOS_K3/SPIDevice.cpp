@@ -28,7 +28,9 @@ extern const AP_HAL::HAL& hal;
 static const SPIDeviceDesc device_table[] = {
     // name        cs  mode  low       high
     { "icm20948",   3,   3,  250000,   250000 },   // onboard IMU
-    { "bmp390",     1,   3,  250000,   250000 },   // onboard barometer
+    { "lps22df",    1,   3,  250000,   250000 },   // onboard barometer (Q-05:
+                                                  // ST LPS22DF, not the BMP390
+                                                  // the device tree names)
 };
 
 static const uint8_t NUM_DEVICES = ARRAY_SIZE(device_table);
@@ -383,6 +385,120 @@ void SPIDeviceManager::selftest()
                      "-- is Linux still bound to 4b00000.spi?\n",
                      (uint32_t)ok, (uint32_t)who);
     }
+    delete dev;
+}
+
+/*
+  Identify the part actually fitted on CS1 (Q-05).
+
+  The barometer has been documented as two different chips since bring-up: the
+  ArduPilot Linux hwdef, the ArduPilot board page and this board's own device
+  tree (`pressure@1: bosch,bmp390-spidev`) all say Bosch BMP390, while the T3
+  board-spec page says ST LPS22DFTR. Every one of those is a DECLARATION. None
+  is a probe, the board has been physically swapped since, and the two parts
+  need different drivers.
+
+  Reads both candidates' identity registers and reports what came back, rather
+  than testing one and calling absence a failure -- "not a BMP390" and "the bus
+  is broken" look identical from a single read.
+*/
+void SPIDeviceManager::baro_ident()
+{
+    AP_HAL::SPIDevice *dev = get_device_ptr("lps22df");
+    if (dev == nullptr) {
+        trace_printf("baro: ident SKIPPED, no lps22df device in the table\n");
+        return;
+    }
+    dev->set_read_flag(0x80);
+
+    /*
+      BMP3xx SPI returns a DUMMY byte before the first real data byte, so a
+      1-byte read of CHIP_ID yields the dummy and looks like a dead bus. Read
+      two and take the second. The ST part has no such quirk, so its WHO_AM_I
+      is read separately at its own length.
+    */
+    uint8_t bosch[2] = {};
+    uint8_t st = 0;
+    bool ok_b, ok_s;
+    {
+        WITH_SEMAPHORE(dev->get_semaphore());
+        ok_b = dev->read_registers(0x00, bosch, 2);   /* BMP3xx CHIP_ID   */
+        ok_s = dev->read_registers(0x0F, &st, 1);     /* LPS22DF WHO_AM_I */
+    }
+
+    trace_printf("baro: ident xfer=%u/%u bosch[0x00]=%x,%x st[0x0f]=%x\n",
+                 (uint32_t)ok_b, (uint32_t)ok_s,
+                 (uint32_t)bosch[0], (uint32_t)bosch[1], (uint32_t)st);
+
+    if (bosch[1] == 0x60) {
+        trace_printf("baro: BMP390 confirmed on CS1 (chip_id=0x60) -- Q-05 closed, use AP_Baro_BMP388\n");
+    } else if (bosch[1] == 0x50) {
+        trace_printf("baro: BMP388 on CS1 (chip_id=0x50), NOT the documented BMP390 -- same driver, note it\n");
+    } else if (st == 0xB4) {
+        trace_printf("baro: LPS22DF confirmed on CS1 (who_am_i=0xb4) -- Q-05 closed the OTHER way, use AP_Baro_LPS2XH\n");
+    } else {
+        trace_printf("baro: UNIDENTIFIED on CS1. Neither 0x60/0x50 (Bosch) nor 0xb4 (ST). "
+                     "All-zero or all-ff means nothing is driving MISO: wrong chip select, "
+                     "part absent, or the bus still Linux's.\n");
+    }
+
+    /*
+      TEMP-DIAG(baro): configure the LPS22DF here and read it back raw.
+
+      AP_Baro_LPS2XH reports 1307 hPa, a static value, with no temperature --
+      which could be a bad conversion, a control register that did not take, a
+      misread burst, or the scaling. Those are indistinguishable from the
+      frontend. Driving the part directly and printing the register contents
+      alongside the raw output bytes separates them: if CTRL_REG1 reads back
+      what was written and STATUS shows fresh data, the sensor is fine and the
+      fault is in the driver's conversion.
+
+      AP_Baro re-runs its own _init() during setup(), so this configuration is
+      overwritten and cannot mislead the real backend.
+      REMOVE-AFTER: barometer reports plausible pressure.
+    */
+    if (st == 0xB4) {
+        WITH_SEMAPHORE(dev->get_semaphore());
+
+        dev->write_register(0x10, 0x00);            /* CTRL_REG1: idle       */
+        dev->write_register(0x11, 1 << 3);          /* CTRL_REG2: BDU        */
+        dev->write_register(0x10, (0x05 << 3) | 0x02); /* 50 Hz, 16x average */
+        hal.scheduler->delay(100);
+
+        uint8_t c1 = 0, c2 = 0, stat = 0, ifc = 0;
+        uint8_t praw[3] = {}, traw[2] = {};
+        dev->read_registers(0x10, &c1, 1);
+        dev->read_registers(0x11, &c2, 1);
+        dev->read_registers(0x0E, &ifc, 1);
+        dev->read_registers(0x27, &stat, 1);
+        dev->read_registers(0x28, praw, 3);
+        dev->read_registers(0x2B, traw, 2);
+
+        const uint32_t praw_u = ((uint32_t)praw[2] << 16) |
+                                ((uint32_t)praw[1] << 8) | praw[0];
+        const int16_t traw_s = (int16_t)(((uint16_t)traw[1] << 8) | traw[0]);
+
+        trace_printf("baro: lps22df ctrl1=%x (want 2a) ctrl2=%x (want 08) if_ctrl=%x status=%x\n",
+                     (uint32_t)c1, (uint32_t)c2, (uint32_t)ifc, (uint32_t)stat);
+        trace_printf("baro: lps22df praw=%x,%x,%x -> %u = %u Pa   traw=%x,%x -> %d = %d cdegC\n",
+                     (uint32_t)praw[0], (uint32_t)praw[1], (uint32_t)praw[2],
+                     praw_u, (uint32_t)(praw_u / 40.96f),
+                     (uint32_t)traw[0], (uint32_t)traw[1],
+                     (int32_t)traw_s, (int32_t)traw_s);
+
+        /* Second sample: a value that does not move between reads means the
+           part is not converting, whatever the registers claim. */
+        hal.scheduler->delay(100);
+        uint8_t praw2[3] = {};
+        dev->read_registers(0x27, &stat, 1);
+        dev->read_registers(0x28, praw2, 3);
+        const uint32_t praw2_u = ((uint32_t)praw2[2] << 16) |
+                                 ((uint32_t)praw2[1] << 8) | praw2[0];
+        trace_printf("baro: lps22df sample2 status=%x praw=%u delta=%d %s\n",
+                     (uint32_t)stat, praw2_u, (int32_t)(praw2_u - praw_u),
+                     (praw2_u == praw_u) ? "STATIC - not converting" : "changing");
+    }
+
     delete dev;
 }
 
