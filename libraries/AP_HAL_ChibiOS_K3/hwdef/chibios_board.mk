@@ -60,7 +60,8 @@ CSRC = $(ALLCSRC) \
        $(HWDEF_DIR)/boot/trace.c \
        $(HWDEF_DIR)/boot/stack_paint.c \
        $(HWDEF_DIR)/boot/ipc_ring.c \
-       $(HWDEF_DIR)/boot/ipc_storage.c
+       $(HWDEF_DIR)/boot/ipc_storage.c \
+       $(CHIBIOS)/os/hal/ports/TI/AM67/am67_wdt.c
 CPPSRC  = $(ALLCPPSRC)
 ACSRC   =
 ACPPSRC =

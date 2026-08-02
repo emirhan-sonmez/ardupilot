@@ -33,7 +33,8 @@
 #include "hwdef/boot/trace.h"  // RemoteProc trace buffer (readable without UART)
 #include "hwdef/boot/ipc_ring.h"  // MAVLink transport to Linux (DR-016)
 #include "hwdef/boot/stack_paint.h"  // Q-25: SYS/main-thread stack high-water mark
-#include <am67_mailbox.h>  // remoteproc shutdown handshake with Linux
+#include <am67_mailbox.h>
+#include <am67_wdt.h>   // M9: MCU RTI windowed watchdog  // remoteproc shutdown handshake with Linux
 
 // --- driver instances ---
 // serial0 (SERIAL0) carries MAVLink 2, and as of DR-016 it is NOT a physical
@@ -313,6 +314,29 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
        selftest() -- after the bus wait, before setup(), while nothing else
        holds the controller. */
     spiDeviceManager.baro_ident();
+
+    /*
+      M9 step 1: measure RTICLK, do NOT arm.
+
+      The DWWD timeout is (PRLD + 1) * 2^13 / RTICLK, and RTICLK for MCU_RTI is
+      set by device-tree clock parents this firmware neither configures nor can
+      read back. Arming against a guessed rate either never fires or resets the
+      board in a loop -- and a reset loop on a board whose only recovery is a
+      physical power cycle (Q-39) is an expensive way to learn the clock.
+      Report it, then arm in a later build with a number rather than a guess.
+    */
+    {
+        const uint32_t hz = am67_wdt_measure_clock();
+        if (hz == 0U) {
+            trace_printf("AP-K3: wdt: RTI down-counter did not advance -- "
+                         "module not clocked, or not ours\n");
+        } else {
+            trace_printf("AP-K3: wdt: MCU_RTI clock ~%u Hz, status=%x. "
+                         "1s timeout would need PRLD=%u\n",
+                         hz, am67_wdt_status(),
+                         (uint32_t)((hz / 8192U) - 1U));
+        }
+    }
 
     trace_printf("AP-K3: entering vehicle setup()\n");
     callbacks->setup();
