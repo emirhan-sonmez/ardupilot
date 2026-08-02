@@ -409,8 +409,41 @@ void AP_InertialSensor_ICM20948_K3::aux_probe_ak09916()
         return;
     }
 
-    const bool ok1 = aux_read(AK09916_I2C_ADDR, AK09916_REG_WIA1, wia1);
-    const bool ok2 = aux_read(AK09916_I2C_ADDR, AK09916_REG_WIA2, wia2);
+    /*
+      Read the master's own configuration back before blaming the
+      magnetometer. A probe that returns zeros cannot distinguish "the
+      AK09916 is not answering" from "the I2C master was never enabled", and
+      on 2026-08-02 a boot failed here with xfer=0/0 while the IMU itself was
+      configured and sampling normally.
+    */
+    {
+        uint8_t uc = 0, mc = 0;
+        (void)select_bank(0);
+        (void)read_reg(REG_USER_CTRL, uc);
+        (void)select_bank(3);
+        (void)read_reg(REG_I2C_MST_CTRL, mc);
+        trace_printf("AP-K3: mag: user_ctrl=%x (want bit5 set) mst_ctrl=%x (want 07)\n",
+                     (uint32_t)uc, (uint32_t)mc);
+    }
+
+    /*
+      Retry the identity read. The aux master shares the die with an IMU that
+      has only just been reset and configured, and a single attempt gives no
+      way to tell a slow start from a dead bus.
+    */
+    bool ok1 = false, ok2 = false;
+    for (uint8_t attempt = 0; attempt < 5; attempt++) {
+        ok1 = aux_read(AK09916_I2C_ADDR, AK09916_REG_WIA1, wia1);
+        ok2 = aux_read(AK09916_I2C_ADDR, AK09916_REG_WIA2, wia2);
+        if (ok1 && ok2 && wia1 == AK09916_WIA1_VAL && wia2 == AK09916_WIA2_VAL) {
+            break;
+        }
+        trace_printf("AP-K3: mag: probe attempt %u failed (xfer=%u/%u wia=%x,%x), retrying\n",
+                     (uint32_t)(attempt + 1), (uint32_t)ok1, (uint32_t)ok2,
+                     (uint32_t)wia1, (uint32_t)wia2);
+        hal.scheduler->delay(20);
+        (void)aux_master_init();
+    }
 
     trace_printf("AP-K3: mag: ak09916 probe xfer=%u/%u wia1=%x (want 48) wia2=%x (want 09)\n",
                  (uint32_t)ok1, (uint32_t)ok2, (uint32_t)wia1, (uint32_t)wia2);
