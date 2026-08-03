@@ -25,7 +25,7 @@
   settings below are derived from one switch for exactly this reason.
 */
 #ifndef PT_ENABLE
-#define PT_ENABLE 1
+#define PT_ENABLE 0
 #endif
 
 /*

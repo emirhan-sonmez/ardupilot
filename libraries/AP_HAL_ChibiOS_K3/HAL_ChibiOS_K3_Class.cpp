@@ -30,6 +30,11 @@
 #include "bench_imu.h"
 #include <AP_RCProtocol/AP_RCProtocol.h>   // AP::RC(), for the rc health line
 #include <AP_Arming/AP_Arming.h>           // AP::arming(), for the arm-state trace line
+#include <AP_Motors/AP_Motors_Class.h>     // AP_Motors::get_singleton(), for the ctl trace line
+#include <RC_Channel/RC_Channel.h>         // rc(), calibrated channel values
+#include <AP_AHRS/AP_AHRS.h>               // AP::ahrs(), attitude for the ctl trace line
+#include <SRV_Channel/SRV_Channel.h>       // SRV_Channels::get_emergency_stop()
+#include <AP_Notify/AP_Notify.h>           // AP_Notify::flags.flight_mode
 #include <hal.h>   // for the ChibiOS SerialDriver SD1
 #include "hwdef/boot/trace.h"  // RemoteProc trace buffer (readable without UART)
 #include "hwdef/boot/ipc_ring.h"  // MAVLink transport to Linux (DR-016)
@@ -550,6 +555,94 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
             trace_printf("AP-K3: arm armed=%u prearm=%u\n",
                          (uint32_t)utilInstance.get_soft_armed(),
                          (uint32_t)AP::arming().get_last_prearm_checks_result());
+
+            /* Commanded pulse width per motor, read back from RCOutput.
+               Separates three failures that all look like "it does not
+               stabilise" from outside:
+
+                 all four equal and moving together with the throttle stick
+                   -> the mixer is running but contributing no attitude
+                      correction (spool state, or a zero attitude error)
+                 all four equal and NOT moving
+                   -> nothing is driving the outputs at all
+                 four different values that change when the frame is tilted
+                   -> stabilisation IS working and the problem is downstream,
+                      in ESC calibration or motor wiring
+
+               Cheap: four cached reads, no hardware access. */
+            trace_printf("AP-K3: mot ch0=%u ch1=%u ch2=%u ch3=%u\n",
+                         (uint32_t)rcoutDriver.read(0),
+                         (uint32_t)rcoutDriver.read(1),
+                         (uint32_t)rcoutDriver.read(2),
+                         (uint32_t)rcoutDriver.read(3));
+
+            /* Why the motors sit on their floor. Everything here is a library
+               singleton, so this costs the HAL no dependency on vehicle code.
+
+                 ctlin=  RC_Channels' CALIBRATED throttle, 0-1000. This is what
+                         the vehicle actually uses, as opposed to the raw
+                         microseconds in the rcch line above. Raw sweeping
+                         1000-2000 while this stays 0 means the RCn_MIN/MAX/
+                         REVERSED mapping is wrong, not the receiver.
+                 thrin=  AP_Motors' filtered throttle demand, x1000. Zero while
+                         ctlin is non-zero puts the fault between the vehicle's
+                         throttle handling and the mixer -- flight mode, or the
+                         spool/landing gate.
+                 spool=  0 SHUT_DOWN, 1 GROUND_IDLE, 2 SPOOLING_UP,
+                         3 THROTTLE_UNLIMITED, 4 SPOOLING_DOWN. Attitude mixing
+                         only exists in state 3; anything else outputs every
+                         motor at the same value no matter how the frame is
+                         tilted, which is indistinguishable from "stabilisation
+                         is broken" without this number.
+                 roll/pitch= AHRS attitude in degrees. If these do not move when
+                         the frame is tilted, the estimate is the problem and
+                         nothing downstream can work. */
+            {
+                const AP_Motors *mot = AP_Motors::get_singleton();
+                const RC_Channel *thr_ch = rc().channel(2);
+                /* estop/mode, 2026-08-03. spool stuck at 1 (GROUND_IDLE) while
+                   armed at full throttle means ap.throttle_zero is being held
+                   true, and in STABILIZE the only things that do that
+                   independently of the throttle stick are the motor emergency
+                   stop and the motor interlock. Both are RC-option driven, so
+                   a switch sitting in the wrong position silently pins the
+                   motors at idle with no message anywhere.
+
+                   mode= is AP_Notify's flight mode number (Copter: 0 STABILIZE,
+                   2 ALT_HOLD, 5 LOITER). Any mode other than 0 changes what the
+                   throttle stick means, which looks identical to this from the
+                   bench. */
+                /* desired vs actual spool, plus the interlock, 2026-08-03.
+                   spool stuck at GROUND_IDLE has exactly two possible causes
+                   and these two numbers separate them:
+
+                     desired=1 -> the VEHICLE is asking for ground idle, i.e.
+                                  copter.ap.throttle_zero is true. That flag is
+                                  only held true (with a non-zero throttle and
+                                  no e-stop) when a channel is assigned
+                                  MOTOR_INTERLOCK and its switch is off.
+                     desired=3 but spool=1 -> the vehicle wants full range and
+                                  AP_Motors is refusing. update_spool_state()
+                                  will not leave GROUND_IDLE while _interlock
+                                  is false, and Copter clears that on
+                                  in_arming_delay, the interlock switch, or the
+                                  e-stop (motors.cpp:94).
+
+                   intlk= is AP_Motors' own interlock flag, the one the state
+                   machine actually reads. */
+                const AP_Motors *m2 = AP_Motors::get_singleton();
+                trace_printf("AP-K3: ctl2 estop=%u mode=%u desired=%u intlk=%u\n",
+                             (uint32_t)SRV_Channels::get_emergency_stop(),
+                             (uint32_t)AP_Notify::flags.flight_mode,
+                             m2 != nullptr ? (uint32_t)m2->get_desired_spool_state() : 99U,
+                             m2 != nullptr ? (uint32_t)m2->get_interlock() : 99U);
+                trace_printf("AP-K3: ctl ctlin=%d thrin=%d spool=%u roll=%d pitch=%d\n",
+                             thr_ch != nullptr ? (int32_t)thr_ch->get_control_in() : -1,
+                             mot != nullptr ? (int32_t)(mot->get_throttle() * 1000.0f) : -1,
+                             mot != nullptr ? (uint32_t)mot->get_spool_state() : 99U,
+                             (int32_t)AP::ahrs().get_roll_deg(),
+                             (int32_t)AP::ahrs().get_pitch_deg());
+            }
             /* pwmblk= (Q-34): RCOutput writes rejected by the exclusive mask,
                i.e. AP_Motors/SRV_Channels attempts to drive the motor pins.
 
