@@ -439,12 +439,19 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
         }
 #endif
 
-        // SD1 TX carries nothing since MAVLink moved to the rings (DR-016),
-        // so this is now a cheap no-op on an empty queue rather than a
-        // load-bearing pump. Kept deliberately: the THRE interrupt still does
-        // not fire on this UART (Q-26), so anything that ever writes to SD1
-        // again -- a SiK radio on this port, a debug console -- would strand
-        // its bytes without it, and the failure would be silent.
+        // SD1 TX no longer has a pad at all: MAVLink moved to the rings
+        // (DR-016), and as of 2026-08-03 the epwm0-gpio5-gpio14 overlay takes
+        // pin 8 for EHRPWM0_B and reconfigures main_uart1 to an RX-only pin
+        // group. UART1 is receive-only hardware now -- pin 10, iBus, owned by
+        // RCInput.
+        //
+        // Kept anyway, as a drain rather than a pump: the THRE interrupt does
+        // not fire on this UART (Q-26), so a write to SD1 from anywhere would
+        // otherwise fill the TX queue and block its writer forever. With no TX
+        // pad those bytes cannot reach a wire either way, so this exists to
+        // ensure that mistake fails harmlessly instead of hanging the main
+        // loop. A non-zero tx= in the alive line means someone is writing to a
+        // port that physically cannot transmit.
         const uint32_t tx_queued = am67_uart1_tx_pump();
 
         static uint32_t loops;

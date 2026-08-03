@@ -4,22 +4,37 @@
 #include "AP_HAL_ChibiOS_K3_Namespace.h"
 
 /*
-  Temporary six-channel RCOutput for the AM67/J722S K3 backend.
+  Four-channel RCOutput for the AM67/J722S K3 backend -- quad X, eHRPWM only.
 
   Channel -> peripheral/output -> Gemstone 40-pin header pin:
-    ch0 -> EHRPWM0_A  -> GPIO5  -> pin 29   (scope-verified)
-    ch1 -> EHRPWM1_A  -> GPIO6  -> pin 31
-    ch2 -> EHRPWM1_B  -> GPIO13 -> pin 33
-    ch3 -> ECAP0 APWM -> GPIO12 -> pin 32
-    ch4 -> ECAP1 APWM -> GPIO16 -> pin 36
-    ch5 -> ECAP2 APWM -> GPIO18 -> pin 12
+    ch0 -> EHRPWM0_A -> GPIO5  -> pin 29
+    ch1 -> EHRPWM0_B -> GPIO14 -> pin 8
+    ch2 -> EHRPWM1_A -> GPIO6  -> pin 31
+    ch3 -> EHRPWM1_B -> GPIO13 -> pin 33
 
-  EHRPWM0_B (pin 8) is intentionally NOT used -- it is the UART1 console TX.
+  WHY NO eCAP. Three eCAP channels (pins 32/36/12) were previously used to
+  reach six outputs. The airframe is a quad and needs four, and eCAP is not
+  equivalent hardware: a different IP block, a 125 MHz fck against eHRPWM's
+  250 MHz (DR-002), and different shadow-load semantics -- ecap_start() drops
+  the active compare to 0% immediately where ehrpwm_start() does not. Four
+  motors on one peripheral type removes a whole class of asymmetry from the
+  output path. The eCAP driver is left in the ChibiOS tree, unused.
 
-  Five peripherals back the six channels (EPWM1 drives ch1+ch2). Each
-  peripheral's time base is clocked by a Linux-owned gate, so enable_ch() waits
-  for that peripheral's counter to actually advance before programming it, and
-  refuses to enable a channel whose peripheral clock never started.
+  WHY PIN 8 IS AVAILABLE NOW. It was MAIN_UART1 TX. DR-016 moved MAVLink to
+  the shared-memory rings, so RCInput uses only pin 10 (RX), and the stock
+  overlay k3-am67a-t3-gem-o1-pwm-epwm0-gpio5-gpio14.dtbo reconfigures
+  main_uart1 to an RX-only pin group as part of taking pad 0x01B0 for
+  EHRPWM0_B. Nothing on this port transmits on UART1 any more.
+
+  Two peripherals back the four channels: EPWM0 drives ch0+ch1 and EPWM1
+  drives ch2+ch3, each pair sharing one time base. Each peripheral's time base
+  is clocked by a Linux-owned gate, so enable_ch() waits for that peripheral's
+  counter to actually advance before programming it, and refuses to enable a
+  channel whose peripheral clock never started.
+
+  NOTE ON MOTOR ORDER. ArduCopter's quad-X frame maps motor 1..4 to channels
+  0..3, so the ESC leads must follow the pin order above, NOT the order used
+  before this change (pins 29/31/33/32).
 */
 class ChibiOS_K3::RCOutput : public AP_HAL::RCOutput {
 public:
@@ -43,12 +58,21 @@ public:
     // periodically, not every loop tick.
     void     retry_pending();
 
-    // Re-writes AQCTLA/AQCTLB on every enabled EPWM channel (ch0-2) every
-    // call -- safe every tick, never touches CMPA/CMPB. Added 2026-07-30:
-    // AQCTLA/B was otherwise written exactly once, at enable_ch() time,
-    // and never revisited -- same written-once-never-reasserted shape as
-    // the TBPRD/frequency bug fixed the same day. Closes that gap for
-    // ECAP channels too where cheap to do so.
+    // Re-writes the whole output configuration -- TBCTL prescale, TBPRD,
+    // CMPCTL and AQCTLA/AQCTLB -- on every enabled channel, every call. Safe
+    // every tick, never touches CMPA/CMPB, so a commanded pulse width is
+    // never disturbed.
+    //
+    // Widened from AQCTL-only 2026-08-03. Linux owns the PWM clock gate and
+    // r5f-setup.sh brings each peripheral up by exporting its sysfs pwm0 and
+    // writing period/duty/enable -- and pwm0 is eHRPWM channel A, i.e. pins
+    // 29 and 31. That write programs TBCTL, TBPRD, CMPA and AQCTLA with
+    // Linux's own values, and it races this firmware at boot because both
+    // remoteproc and gemstone-r5f-setup.service run during the same startup.
+    // TBCTL/TBPRD/CMPCTL were previously written exactly once in
+    // ehrpwm_start() and never revisited, so whichever side wrote last won
+    // permanently. Reasserting all of it makes the R5F unconditionally the
+    // last writer regardless of who got there first.
     void     reassert_outputs();
 
     /*
@@ -96,12 +120,13 @@ public:
 
     // Count of write() calls dropped by the exclusive mask. Non-zero and
     // climbing at ~loop_rate x NUM_CH is the direct proof that a second
-    // writer was competing for these pins.
+    // writer was competing for these pins. Healthy value is loop_rate x 4
+    // since the channel count dropped from 6.
     uint32_t foreign_writes_blocked() const { return _foreign_blocked; }
 
 private:
-    static const uint8_t  NUM_CH = 6;
-    static const uint8_t  NUM_PERIPH = 5;      // EPWM0, EPWM1, ECAP0, ECAP1, ECAP2
+    static const uint8_t  NUM_CH = 4;
+    static const uint8_t  NUM_PERIPH = 2;      // EPWM0 (ch0+ch1), EPWM1 (ch2+ch3)
     static const uint16_t PWM_MIN_US = 1000;   // test clamp
     static const uint16_t PWM_MAX_US = 2000;
 

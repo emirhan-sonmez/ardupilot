@@ -6,36 +6,38 @@
 #include <ch.h>                // chThdSleepMilliseconds
 #include <hal.h>               // AM67_* base addresses (board.h)
 #include <am67_epwm.h>         // generic eHRPWM driver (ChibiOS AM67 port)
-#include <am67_ecap.h>         // eCAP APWM driver
 #include "hwdef/boot/trace.h"  // RemoteProc trace buffer (independent of UART)
 
 using namespace ChibiOS_K3;
 
-// Peripheral indices (EPWM1 backs both ch1 and ch2).
-enum { P_EPWM0 = 0, P_EPWM1 = 1, P_ECAP0 = 2, P_ECAP1 = 3, P_ECAP2 = 4 };
+// Peripheral indices. Each eHRPWM backs two channels off one shared time base.
+enum { P_EPWM0 = 0, P_EPWM1 = 1 };
 
-struct periph_desc { uint32_t base; bool is_ecap; };
-static const periph_desc PERIPH[5] = {
-    { AM67_EPWM0_BASE, false },
-    { AM67_EPWM1_BASE, false },
-    { AM67_ECAP0_BASE, true  },
-    { AM67_ECAP1_BASE, true  },
-    { AM67_ECAP2_BASE, true  },
+struct periph_desc { uint32_t base; };
+static const periph_desc PERIPH[] = {
+    { AM67_EPWM0_BASE },
+    { AM67_EPWM1_BASE },
 };
 
 struct chan_desc { uint8_t periph; bool output_b; };
-static const chan_desc CHAN[6] = {
-    { P_EPWM0, false },   // ch0 EHRPWM0_A
-    { P_EPWM1, false },   // ch1 EHRPWM1_A
-    { P_EPWM1, true  },   // ch2 EHRPWM1_B
-    { P_ECAP0, false },   // ch3 ECAP0 APWM
-    { P_ECAP1, false },   // ch4 ECAP1 APWM
-    { P_ECAP2, false },   // ch5 ECAP2 APWM
+static const chan_desc CHAN[] = {
+    { P_EPWM0, false },   // ch0 EHRPWM0_A -> pin 29
+    { P_EPWM0, true  },   // ch1 EHRPWM0_B -> pin 8
+    { P_EPWM1, false },   // ch2 EHRPWM1_A -> pin 31
+    { P_EPWM1, true  },   // ch3 EHRPWM1_B -> pin 33
 };
 
 void RCOutput::init()
 {
-    trace_printf("rcout: init (6 channels)\n");
+    // NUM_CH/NUM_PERIPH are private, so these tables cannot be sized from them
+    // directly at file scope. Check the agreement here instead, where the
+    // members are visible: a table that disagrees with the counts indexes off
+    // the end of the other one, silently, on a live output path.
+    static_assert(sizeof(CHAN) / sizeof(CHAN[0]) == NUM_CH,
+                  "CHAN table does not match NUM_CH");
+    static_assert(sizeof(PERIPH) / sizeof(PERIPH[0]) == NUM_PERIPH,
+                  "PERIPH table does not match NUM_PERIPH");
+    trace_printf("rcout: init (4 channels, eHRPWM only)\n");
 }
 
 /*
@@ -69,23 +71,21 @@ void RCOutput::set_freq(uint32_t chmask, uint16_t freq_hz)
         freq_hz = RCOUTPUT_VERIFIED_FREQ_HZ;
     }
     /*
-      Idempotence guard, 2026-07-30. Re-running ehrpwm_start()/ecap_start() on a
-      peripheral already at this frequency is destructive, not free:
+      Idempotence guard, 2026-07-30. Re-running ehrpwm_start() on a peripheral
+      already at this frequency is destructive, not free: it writes TBCTR = 0,
+      and resetting the counter part-way through a period stretches or
+      truncates that one period while the pulse width stays put, so the
+      measured duty jumps for a cycle. A reset landing just after the CMPA
+      match roughly doubles the period -> ~5-7% measured where 10% was
+      commanded.
 
-        - ehrpwm_start() writes TBCTR = 0. Resetting the counter part-way
-          through a period stretches or truncates that one period while the
-          pulse width stays put, so the measured duty jumps for a cycle. A
-          reset landing just after the CMPA match roughly doubles the period
-          -> ~5-7% measured where 10% was commanded.
-        - ecap_start() writes CAP2 = 0, i.e. drops the active compare to 0%
-          duty immediately, until the shadow reloads at the next boundary.
-
-      Observed on hardware this way: ch3's active compare went 125000 -> 0
-      across bench_passthrough's own set_freq(0x3F, 50) call, which is a no-op
-      by intent. Note the frequency clamp above runs first, so even a *refused*
-      request (AP_Motors asks for 400 then 490 during setup) reached this loop
-      and glitched all six pins. Nothing above this driver should be able to
-      disturb a running output by asking for the frequency it already has.
+      Observed on hardware via the eCAP path (since removed), whose active
+      compare went 125000 -> 0 across bench_passthrough's own set_freq(0x3F,
+      50) call, a no-op by intent. Note the frequency clamp above runs first,
+      so even a *refused* request (AP_Motors asks for 400 then 490 during
+      setup) reached this loop and glitched every pin. Nothing above this
+      driver should be able to disturb a running output by asking for the
+      frequency it already has.
     */
     if (freq_hz == _freq_hz) {
         return;
@@ -102,11 +102,7 @@ void RCOutput::set_freq(uint32_t chmask, uint16_t freq_hz)
         }
         uint8_t p = CHAN[ch].periph;
         if (_p_started[p]) {
-            if (PERIPH[p].is_ecap) {
-                ecap_start(PERIPH[p].base, _freq_hz);
-            } else {
-                ehrpwm_start(PERIPH[p].base, _freq_hz);
-            }
+            ehrpwm_start(PERIPH[p].base, _freq_hz);
             if (_ch_enabled[ch]) {
                 hw_set(ch, _pulse_us[ch]);
             }
@@ -126,9 +122,9 @@ bool RCOutput::wait_for_timebase(uint8_t p, uint16_t max_tries)
     // (~5 s, the boot-time safe-init path) vs. max_tries=1 (~5ms, the cheap
     // periodic retry_pending() path) -- see ensure_peripheral().
     for (uint16_t tries = 0; tries < max_tries; tries++) {
-        uint32_t a = d.is_ecap ? ecap_read_tsctr(d.base) : ehrpwm_read_tbctr(d.base);
+        uint32_t a = ehrpwm_read_tbctr(d.base);
         chThdSleepMilliseconds(5);
-        uint32_t b = d.is_ecap ? ecap_read_tsctr(d.base) : ehrpwm_read_tbctr(d.base);
+        uint32_t b = ehrpwm_read_tbctr(d.base);
         if (a != b) {
             trace_printf("rcout: periph %u timebase running\n", (uint32_t)p);
             return true;
@@ -162,11 +158,7 @@ bool RCOutput::ensure_peripheral(uint8_t p)
         return false;
     }
     _p_failed[p] = false;
-    if (PERIPH[p].is_ecap) {
-        ecap_start(PERIPH[p].base, _freq_hz);
-    } else {
-        ehrpwm_start(PERIPH[p].base, _freq_hz);
-    }
+    ehrpwm_start(PERIPH[p].base, _freq_hz);
     _p_started[p] = true;
     trace_printf("rcout: periph %u started (freq=%u)\n",
                  (uint32_t)p, (uint32_t)_freq_hz);
@@ -189,20 +181,14 @@ void RCOutput::reassert_outputs()
             continue;
         }
         const chan_desc &c = CHAN[chan];
-        if (!PERIPH[c.periph].is_ecap) {
-            ehrpwm_out_reassert(PERIPH[c.periph].base, c.output_b);
-        }
+        ehrpwm_out_reassert(PERIPH[c.periph].base, c.output_b, _freq_hz);
     }
 }
 
 void RCOutput::hw_set(uint8_t chan, uint16_t us)
 {
     const chan_desc &c = CHAN[chan];
-    if (PERIPH[c.periph].is_ecap) {
-        ecap_set_pulse_us(PERIPH[c.periph].base, us);
-    } else {
-        ehrpwm_out_set_pulse_us(PERIPH[c.periph].base, c.output_b, us);
-    }
+    ehrpwm_out_set_pulse_us(PERIPH[c.periph].base, c.output_b, us);
 }
 
 void RCOutput::enable_ch(uint8_t chan)
@@ -233,9 +219,7 @@ void RCOutput::enable_ch(uint8_t chan)
         }
         return;                              // do not enable if clock failed
     }
-    if (!PERIPH[c.periph].is_ecap) {
-        ehrpwm_out_enable(PERIPH[c.periph].base, c.output_b);
-    }
+    ehrpwm_out_enable(PERIPH[c.periph].base, c.output_b);
     _ch_enabled[chan] = true;
 
     uint16_t us = _pulse_us[chan];
@@ -253,11 +237,7 @@ void RCOutput::disable_ch(uint8_t chan)
     }
     _ch_enabled[chan] = false;
     const chan_desc &c = CHAN[chan];
-    if (PERIPH[c.periph].is_ecap) {
-        ecap_low(PERIPH[c.periph].base);
-    } else {
-        ehrpwm_out_low(PERIPH[c.periph].base, c.output_b);
-    }
+    ehrpwm_out_low(PERIPH[c.periph].base, c.output_b);
 }
 
 void RCOutput::set_exclusive_mask(uint32_t mask)
@@ -322,32 +302,21 @@ void RCOutput::hw_write(uint8_t chan, uint16_t period_us)
     // loops and hides everything logged after it (trace.c stops accepting
     // once full). PWM behaviour above is unchanged.
     static uint8_t write_trace_count;
-    if (write_trace_count >= 24) {          // ~4 loops x 6 channels
+    if (write_trace_count >= 16) {          // ~4 loops x 4 channels
         return;
     }
     write_trace_count++;
 
     const chan_desc &c = CHAN[chan];
-    if (PERIPH[c.periph].is_ecap) {
-        // Shadow = what we just wrote; active = what the hardware runs now (it
-        // catches up to the shadow at the next period boundary).
-        trace_printf("rcout: ch%u=%u us ECAP shadow[cmp=%u prd=%u] active[cmp=%u prd=%u]\n",
-                     (uint32_t)chan, (uint32_t)period_us,
-                     (uint32_t)ecap_read_compare_shadow(PERIPH[c.periph].base),
-                     (uint32_t)ecap_read_period_shadow(PERIPH[c.periph].base),
-                     (uint32_t)ecap_read_compare(PERIPH[c.periph].base),
-                     (uint32_t)ecap_read_period(PERIPH[c.periph].base));
-    } else {
-        // cmpa_shadow, not the active compare: CMPCTL keeps CMPA/CMPB in
-        // shadow mode (load at CTR=ZERO) and a read of the CMPA/CMPB address
-        // returns the shadow. Classic eHRPWM exposes no separate active-compare
-        // address, so this readback can only ever confirm our own last write --
-        // it cannot prove what the pin is doing. Do not treat it as pin proof.
-        trace_printf("rcout: ch%u=%u us EPWM cmpa_shadow=%u tbprd=%u\n",
-                     (uint32_t)chan, (uint32_t)period_us,
-                     (uint32_t)ehrpwm_read_cmp(PERIPH[c.periph].base, c.output_b),
-                     (uint32_t)ehrpwm_read_tbprd(PERIPH[c.periph].base));
-    }
+    // cmp_shadow, not the active compare: CMPCTL keeps CMPA/CMPB in shadow
+    // mode (load at CTR=ZERO) and a read of the CMPA/CMPB address returns the
+    // shadow. Classic eHRPWM exposes no separate active-compare address, so
+    // this readback can only ever confirm our own last write -- it cannot
+    // prove what the pin is doing. Do not treat it as pin proof.
+    trace_printf("rcout: ch%u=%u us EPWM cmp_shadow=%u tbprd=%u\n",
+                 (uint32_t)chan, (uint32_t)period_us,
+                 (uint32_t)ehrpwm_read_cmp(PERIPH[c.periph].base, c.output_b),
+                 (uint32_t)ehrpwm_read_tbprd(PERIPH[c.periph].base));
 }
 
 uint16_t RCOutput::read(uint8_t chan)
