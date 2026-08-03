@@ -29,6 +29,7 @@
 #include "bench_passthrough.h"
 #include "bench_imu.h"
 #include <AP_RCProtocol/AP_RCProtocol.h>   // AP::RC(), for the rc health line
+#include <AP_Arming/AP_Arming.h>           // AP::arming(), for the arm-state trace line
 #include <hal.h>   // for the ChibiOS SerialDriver SD1
 #include "hwdef/boot/trace.h"  // RemoteProc trace buffer (readable without UART)
 #include "hwdef/boot/ipc_ring.h"  // MAVLink transport to Linux (DR-016)
@@ -406,7 +407,15 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
         // these outputs alone, this runs last and unconditionally
         // overwrites them with the arm-gated value every tick. PROPELLERS
         // OFF.
+        //
+        // Disabled by default as of 2026-08-03 (PT_ENABLE): ArduCopter's own
+        // AP_Motors mixer drives the outputs now, so stabilisation computed
+        // from the IMU and EKF3 actually reaches the pins instead of being
+        // dropped by the exclusive mask. Guarded rather than deleted -- see
+        // bench_passthrough.h.
+#if PT_ENABLE
         ChibiOS_K3::bench_passthrough_update();
+#endif
 
         // Sensor read-out, rate-limited internally (50 Hz sample, 0.2 Hz
         // trace line). No-op until bench_imu_init() found the part, and
@@ -485,6 +494,20 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
                that was reconstructed after the fact from byte counts; this
                separates "died at the Nth compaction" from "died N seconds in",
                which the compaction differential turns on. */
+            /* Raw iBus channels 1-6, straight from AP_RCProtocol, before any
+               RCMAP/RC_CHANNELS interpretation. Added 2026-08-03 for two
+               questions the single thr= could not answer: which stick actually
+               drives which channel (thr= had been pinned at 1000 while the
+               others moved), and whether the arm switch reaches the board at
+               all. A switch that never changes its number here is a
+               transmitter or mixing problem, not a firmware one. */
+            trace_printf("AP-K3: rcch %u:%u %u:%u %u:%u %u:%u %u:%u %u:%u\n",
+                         1U, (uint32_t)AP::RC().read(0),
+                         2U, (uint32_t)AP::RC().read(1),
+                         3U, (uint32_t)AP::RC().read(2),
+                         4U, (uint32_t)AP::RC().read(3),
+                         5U, (uint32_t)AP::RC().read(4),
+                         6U, (uint32_t)AP::RC().read(5));
             trace_printf("AP-K3: rc dtmax=%ums rcb=%u/5s rcch=%u thr=%u trcdrop=%u trcomp=%u\n",
                          dt_max_ms, rc_bytes - last_rc_bytes,
                          (uint32_t)AP::RC().num_channels(),
@@ -510,12 +533,36 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
             trace_printf("AP-K3: mav txq=%u refused=%u host=%u\n",
                          ipc_ring_tx_pending(), ipc_ring_tx_refused(),
                          ipc_ring_host_alive());
+
+            /* Arming state, so "the motors will not spin" is answerable
+               without a ground station. Since PT_ENABLE=0 handed the outputs
+               to AP_Motors, nothing reaches a pin until the VEHICLE is armed
+               -- and the vehicle refuses until prearm passes. The individual
+               refusal reasons are traced by AP_Arming::check_failed(), which
+               only runs when something asks it to arm; this line reports the
+               standing state either way.
+
+               armed=  the soft-armed flag AP_Motors gates its output on.
+               prearm= result of the last prearm run: 0 means something is
+                       refusing, and the AP-K3: PreArm: lines say what. */
+            /* utilInstance, not hal.util: this translation unit defines the
+               HAL, so the global `hal` reference does not exist here. */
+            trace_printf("AP-K3: arm armed=%u prearm=%u\n",
+                         (uint32_t)utilInstance.get_soft_armed(),
+                         (uint32_t)AP::arming().get_last_prearm_checks_result());
             /* pwmblk= (Q-34): RCOutput writes rejected by the exclusive mask,
                i.e. AP_Motors/SRV_Channels attempts to drive the motor pins.
-               Climbing at roughly loop rate x 6 is the direct proof that a
-               second writer really was competing for these outputs; frozen at
-               0 while the scope still dances would mean the competing writer
-               is something else and this fix is aimed wrong. */
+
+               With PT_ENABLE=0 (the default since 2026-08-03) the mask is 0
+               and the expected value is a FROZEN 0 -- AP_Motors owns the pins
+               and nothing is being dropped. A climbing pwmblk now means the
+               passthrough was compiled back in and is stealing the outputs
+               from the vehicle's mixer.
+
+               With PT_ENABLE=1 it inverts: climbing at roughly loop rate x 4
+               is the proof that a second writer really was competing, and a
+               frozen 0 while the scope dances would mean the competing writer
+               is something else and the fix is aimed wrong. */
             trace_printf("AP-K3: alive t=%ums loops=%u txq=%u pwmblk=%u stackhw=%u/%u uart[notify=%u isr=%u thre=%u fifo=%u deq=%u thr=%u]\n",
                          now_ms, loops, tx_queued,
                          rcoutDriver.foreign_writes_blocked(),

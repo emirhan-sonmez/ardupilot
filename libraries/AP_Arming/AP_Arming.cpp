@@ -38,6 +38,22 @@
 #include <AP_AHRS/AP_AHRS.h>
 #include <AP_Baro/AP_Baro.h>
 #include <AP_RangeFinder/AP_RangeFinder.h>
+#if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
+/*
+  Gemstone O1 R5F: mirror every prearm/arm refusal into the RemoteProc trace
+  buffer as well as sending it to the GCS.
+
+  On this board the GCS link is MAVLink over a shared-memory ring bridged to
+  Wi-Fi, and that Wi-Fi has been measured at signal 9-17 with beacon loss while
+  stationary. A refusal that only reaches QGroundControl is invisible exactly
+  when the link is the thing misbehaving, which leaves "it will not arm" with
+  no diagnosable reason and no serial console (Q-40) to fall back on.
+
+  The trace buffer needs no network, no ground station and no working link --
+  `gem-trace tail` reads it over ssh, or gem-tracesnap archives it to disk.
+*/
+#include <AP_HAL_ChibiOS_K3/hwdef/boot/trace.h>
+#endif
 #include <AP_Generator/AP_Generator.h>
 #include <AP_Terrain/AP_Terrain.h>
 #include <AP_ADSB/AP_ADSB.h>
@@ -353,6 +369,19 @@ void AP_Arming::check_failed(const AP_Arming::Check check, bool report, const ch
     }
     hal.util->snprintf(taggedfmt, sizeof(taggedfmt), metafmt, fmt);
 
+#if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
+    {
+        // Own va_list: the one below is consumed by send_textv, and a va_list
+        // cannot be walked twice.
+        char tracebuf[MAVLINK_MSG_STATUSTEXT_FIELD_TEXT_LEN+1];
+        va_list trace_args;
+        va_start(trace_args, fmt);
+        hal.util->vsnprintf(tracebuf, sizeof(tracebuf), taggedfmt, trace_args);
+        va_end(trace_args);
+        trace_printf("AP-K3: %s\n", tracebuf);
+    }
+#endif
+
 #if HAL_GCS_ENABLED
     MAV_SEVERITY severity = MAV_SEVERITY_CRITICAL;
     if (!check_enabled(check)) {
@@ -382,6 +411,17 @@ void AP_Arming::check_failed(bool report, const char *fmt, ...) const
         metafmt = "Arm: %s";
     }
     hal.util->snprintf(taggedfmt, sizeof(taggedfmt), metafmt, fmt);
+
+#if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
+    {
+        char tracebuf[MAVLINK_MSG_STATUSTEXT_FIELD_TEXT_LEN+1];
+        va_list trace_args;
+        va_start(trace_args, fmt);
+        hal.util->vsnprintf(tracebuf, sizeof(tracebuf), taggedfmt, trace_args);
+        va_end(trace_args);
+        trace_printf("AP-K3: %s\n", tracebuf);
+    }
+#endif
 
     va_list arg_list;
     va_start(arg_list, fmt);
