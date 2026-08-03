@@ -59,6 +59,24 @@
 #define HAL_HAVE_SERVO_VOLTAGE 0
 #define HAL_HAVE_SAFETY_SWITCH 0
 
+/*
+  No logging backend by default.
+
+  This board has no filesystem and no dataflash chip, so AP_Logger's default
+  selection falls all the way through to Backend_Type::MAVLINK. That backend
+  then gets created, _next_backend becomes non-zero, logging_present() returns
+  true, and the prearm logging check runs -- and fails, permanently, with
+  "PreArm: Logging failed". The vehicle cannot arm because of a log target that
+  does not exist on this hardware.
+
+  Setting LOG_BACKEND_TYPE=0 in a ground station fixes it per-board and has to
+  be redone on every fresh storage image, which is a trap for whoever sets this
+  board up next. Default it off here instead. Anyone who does want MAVLink
+  logging can still enable it with the parameter; the backend is still compiled
+  in.
+*/
+#define HAL_LOGGING_BACKENDS_DEFAULT 0
+
 // Concrete Semaphore types for this board (mirrors AP_HAL/board/chibios.h).
 // Guarded by __cplusplus: this board header is also reached by C translation
 // units (e.g. the Lua sources via lua_common_defs.h -> AP_HAL_Boards.h), and the
