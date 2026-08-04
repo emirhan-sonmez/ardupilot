@@ -95,80 +95,80 @@
  *          correctness -- the next flush sees the same dirty bits.
  */
 typedef struct {
-  volatile uint32_t magic;       /* R5F:  IPC_STORAGE_MAGIC once valid      */
-  volatile uint32_t version;     /* R5F:  IPC_STORAGE_VERSION               */
-  volatile uint32_t size;        /* R5F:  IPC_STORAGE_SIZE                  */
+    volatile uint32_t magic;       /* R5F:  IPC_STORAGE_MAGIC once valid      */
+    volatile uint32_t version;     /* R5F:  IPC_STORAGE_VERSION               */
+    volatile uint32_t size;        /* R5F:  IPC_STORAGE_SIZE                  */
 
-  /*
-    Load handshake. The daemon fills the image from its file, then publishes
-    load_seq. The R5F treats the image as authoritative only once
-    host_ready is set AND load_seq has changed since boot; until then it
-    serves zeros, exactly as Empty::Storage did, so a missing daemon
-    degrades to today's behaviour instead of to garbage parameters.
-  */
-  volatile uint32_t host_ready;  /* HOST: 1 once the image is populated     */
-  volatile uint32_t load_seq;    /* HOST: bumped after each full load       */
+    /*
+      Load handshake. The daemon fills the image from its file, then publishes
+      load_seq. The R5F treats the image as authoritative only once
+      host_ready is set AND load_seq has changed since boot; until then it
+      serves zeros, exactly as Empty::Storage did, so a missing daemon
+      degrades to today's behaviour instead of to garbage parameters.
+    */
+    volatile uint32_t host_ready;  /* HOST: 1 once the image is populated     */
+    volatile uint32_t load_seq;    /* HOST: bumped after each full load       */
 
-  /*
-    Writeback. The R5F bumps dirty_seq after changing the image; the daemon
-    snapshots it, writes the whole image out, then copies that snapshot into
-    saved_seq. saved_seq == dirty_seq means everything the R5F has written is
-    on disk -- that, not write_block() returning, is what a "parameters
-    saved" indication should key off.
+    /*
+      Writeback. The R5F bumps dirty_seq after changing the image; the daemon
+      snapshots it, writes the whole image out, then copies that snapshot into
+      saved_seq. saved_seq == dirty_seq means everything the R5F has written is
+      on disk -- that, not write_block() returning, is what a "parameters
+      saved" indication should key off.
 
-    Snapshot-before-write is load-bearing on the daemon side: taking it
-    afterwards would let a write that arrived mid-flush be marked persisted
-    when it was not.
-  */
-  volatile uint32_t dirty_seq;   /* R5F:  bumped after each image change    */
-  volatile uint32_t saved_seq;   /* HOST: last dirty_seq durably persisted  */
+      Snapshot-before-write is load-bearing on the daemon side: taking it
+      afterwards would let a write that arrived mid-flush be marked persisted
+      when it was not.
+    */
+    volatile uint32_t dirty_seq;   /* R5F:  bumped after each image change    */
+    volatile uint32_t saved_seq;   /* HOST: last dirty_seq durably persisted  */
 
-  volatile uint32_t host_alive;  /* HOST: liveness counter, as the rings do */
-  volatile uint32_t write_errs;  /* HOST: failed file writes, sticky        */
+    volatile uint32_t host_alive;  /* HOST: liveness counter, as the rings do */
+    volatile uint32_t write_errs;  /* HOST: failed file writes, sticky        */
 } ipc_storage_hdr_t;
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-  /**
-   * @brief   Publish the control block. Idempotent per boot.
-   * @details Does NOT wait for the daemon. Reads before the image is loaded
-   *          return zeros rather than blocking the boot.
-   */
-  void ipc_storage_init(void);
+/**
+ * @brief   Publish the control block. Idempotent per boot.
+ * @details Does NOT wait for the daemon. Reads before the image is loaded
+ *          return zeros rather than blocking the boot.
+ */
+void ipc_storage_init(void);
 
-  /**
-   * @brief   True once Linux has populated the image.
-   */
-  bool ipc_storage_ready(void);
+/**
+ * @brief   True once Linux has populated the image.
+ */
+bool ipc_storage_ready(void);
 
-  /**
-   * @brief   Bounded wait for the daemon to publish the image.
-   * @details AP_HAL::Storage::init() runs before the vehicle reads any
-   *          parameter, and a read that lands before the image arrives is
-   *          indistinguishable from a genuinely empty EEPROM -- ArduPilot
-   *          would format it and write defaults over the real values. Same
-   *          class of one-shot race as the IMU probe (see wait_for_imu_bus).
-   *
-   * @return  True if the image arrived, false on timeout.
-   */
-  bool ipc_storage_wait_ready(uint32_t timeout_ms);
+/**
+ * @brief   Bounded wait for the daemon to publish the image.
+ * @details AP_HAL::Storage::init() runs before the vehicle reads any
+ *          parameter, and a read that lands before the image arrives is
+ *          indistinguishable from a genuinely empty EEPROM -- ArduPilot
+ *          would format it and write defaults over the real values. Same
+ *          class of one-shot race as the IMU probe (see wait_for_imu_bus).
+ *
+ * @return  True if the image arrived, false on timeout.
+ */
+bool ipc_storage_wait_ready(uint32_t timeout_ms);
 
-  /**
-   * @brief   Copy bytes out of the shared image.
-   */
-  void ipc_storage_read(uint32_t offset, uint8_t *dst, uint32_t len);
+/**
+ * @brief   Copy bytes out of the shared image.
+ */
+void ipc_storage_read(uint32_t offset, uint8_t *dst, uint32_t len);
 
-  /**
-   * @brief   Copy bytes into the shared image and mark the lines dirty.
-   */
-  void ipc_storage_write(uint32_t offset, const uint8_t *src, uint32_t len);
+/**
+ * @brief   Copy bytes into the shared image and mark the lines dirty.
+ */
+void ipc_storage_write(uint32_t offset, const uint8_t *src, uint32_t len);
 
-  /**
-   * @brief   True when every write so far is durably on disk.
-   */
-  bool ipc_storage_synced(void);
+/**
+ * @brief   True when every write so far is durably on disk.
+ */
+bool ipc_storage_synced(void);
 
 #ifdef __cplusplus
 }

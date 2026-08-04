@@ -38,36 +38,39 @@ extern uint32_t __sys_stack_end__;
   forces genuine per-byte stores. Root cause of why memset() itself faults
   this early is still open; this sidesteps it rather than explains it.
 */
-void stack_paint_init(void) {
-  volatile uint32_t marker;
-  uint8_t *base = (uint8_t *)&__sys_stack_base__;
-  uint8_t *safe_top = (uint8_t *)&marker;
+void stack_paint_init(void)
+{
+    volatile uint32_t marker;
+    uint8_t *base = (uint8_t *)&__sys_stack_base__;
+    uint8_t *safe_top = (uint8_t *)&marker;
 
-  if (safe_top > base) {
-    volatile uint8_t *p = base;
-    while (p < safe_top) {
-      *p++ = (uint8_t)STACK_PAINT_PATTERN;
+    if (safe_top > base) {
+        volatile uint8_t *p = base;
+        while (p < safe_top) {
+            *p++ = (uint8_t)STACK_PAINT_PATTERN;
+        }
     }
-  }
 }
 
 /* Bytes between the deepest disturbed byte and the stack top -- the peak
    depth ever reached since stack_paint_init(). Scans from the base (deepest
    possible) upward for the first still-intact pattern byte. */
-uint32_t stack_paint_highwater(void) {
-  const uint8_t *base = (const uint8_t *)&__sys_stack_base__;
-  const uint8_t *end = (const uint8_t *)&__sys_stack_end__;
-  const uint8_t *p = base;
+uint32_t stack_paint_highwater(void)
+{
+    const uint8_t *base = (const uint8_t *)&__sys_stack_base__;
+    const uint8_t *end = (const uint8_t *)&__sys_stack_end__;
+    const uint8_t *p = base;
 
-  while ((p < end) && (*p == (uint8_t)STACK_PAINT_PATTERN)) {
-    p++;
-  }
-  return (uint32_t)(end - p);
+    while ((p < end) && (*p == (uint8_t)STACK_PAINT_PATTERN)) {
+        p++;
+    }
+    return (uint32_t)(end - p);
 }
 
-uint32_t stack_paint_total(void) {
-  const uint8_t *base = (const uint8_t *)&__sys_stack_base__;
-  const uint8_t *end = (const uint8_t *)&__sys_stack_end__;
+uint32_t stack_paint_total(void)
+{
+    const uint8_t *base = (const uint8_t *)&__sys_stack_base__;
+    const uint8_t *end = (const uint8_t *)&__sys_stack_end__;
 
-  return (uint32_t)(end - base);
+    return (uint32_t)(end - base);
 }

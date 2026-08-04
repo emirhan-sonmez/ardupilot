@@ -40,17 +40,18 @@
 #define PT_EXCLUSIVE_OUTPUTS 1
 #endif
 
-namespace ChibiOS_K3 {
-    // Every real channel, not just the four this module mixes: SRV_Channels
-    // ::push() writes every channel every tick, so any spare channel needs the
-    // same protection to stay at its safe boot idle. Zero when the passthrough
-    // is disabled, which is what lets AP_Motors reach the pins at all.
-    constexpr uint32_t PT_EXCLUSIVE_MASK =
-        (PT_ENABLE && PT_EXCLUSIVE_OUTPUTS) ? 0x0FU : 0U;
+namespace ChibiOS_K3
+{
+// Every real channel, not just the four this module mixes: SRV_Channels
+// ::push() writes every channel every tick, so any spare channel needs the
+// same protection to stay at its safe boot idle. Zero when the passthrough
+// is disabled, which is what lets AP_Motors reach the pins at all.
+constexpr uint32_t PT_EXCLUSIVE_MASK =
+    (PT_ENABLE && PT_EXCLUSIVE_OUTPUTS) ? 0x0FU : 0U;
 
-    // Bench RC->PWM passthrough for the four quad-X outputs. Called every
-    // main-loop tick from HAL_ChibiOS_K3::run(), after rcinDriver.update()
-    // so fresh iBus data is available. See bench_passthrough.cpp for scope
-    // and safety notes.
-    void bench_passthrough_update();
+// Bench RC->PWM passthrough for the four quad-X outputs. Called every
+// main-loop tick from HAL_ChibiOS_K3::run(), after rcinDriver.update()
+// so fresh iBus data is available. See bench_passthrough.cpp for scope
+// and safety notes.
+void bench_passthrough_update();
 }

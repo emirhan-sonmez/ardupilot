@@ -36,7 +36,8 @@
   0..3, so the ESC leads must follow the pin order above, NOT the order used
   before this change (pins 29/31/33/32).
 */
-class ChibiOS_K3::RCOutput : public AP_HAL::RCOutput {
+class ChibiOS_K3::RCOutput : public AP_HAL::RCOutput
+{
 public:
     void     init() override;
     void     set_freq(uint32_t chmask, uint16_t freq_hz) override;
@@ -122,7 +123,10 @@ public:
     // climbing at ~loop_rate x NUM_CH is the direct proof that a second
     // writer was competing for these pins. Healthy value is loop_rate x 4
     // since the channel count dropped from 6.
-    uint32_t foreign_writes_blocked() const { return _foreign_blocked; }
+    uint32_t foreign_writes_blocked() const
+    {
+        return _foreign_blocked;
+    }
 
 private:
     static const uint8_t  NUM_CH = 4;

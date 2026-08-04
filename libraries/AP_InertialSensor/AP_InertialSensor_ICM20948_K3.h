@@ -60,10 +60,12 @@ private:
     */
     bool aux_master_init();
     bool aux_xfer(uint8_t addr, uint8_t reg, uint8_t *value, bool is_read);
-    bool aux_read(uint8_t addr, uint8_t reg, uint8_t &value) {
+    bool aux_read(uint8_t addr, uint8_t reg, uint8_t &value)
+    {
         return aux_xfer(addr, reg, &value, true);
     }
-    bool aux_write(uint8_t addr, uint8_t reg, uint8_t value) {
+    bool aux_write(uint8_t addr, uint8_t reg, uint8_t value)
+    {
         return aux_xfer(addr, reg, &value, false);
     }
     void aux_probe_ak09916();
@@ -88,7 +90,10 @@ public:
       Returns false until a sample has actually arrived, so a compass backend
       cannot publish zeros as if they were a measurement.
     */
-    static AP_InertialSensor_ICM20948_K3 *get_singleton() { return _singleton; }
+    static AP_InertialSensor_ICM20948_K3 *get_singleton()
+    {
+        return _singleton;
+    }
     bool get_mag_field(Vector3f &field, uint32_t &counter) const;
 
 private:

@@ -14,19 +14,20 @@
     later:            RCOutput, RCInput, CANIface (K3 MCAN)
 */
 
-namespace ChibiOS_K3 {
-    // Real implementations (declared as they land).
-    class Semaphore;
-    class BinarySemaphore;
-    class Scheduler;
-    class Util;
-    class UARTDriver;
-    class IPCUARTDriver;
-    class RCOutput;
-    class RCInput;
-    struct SPIDeviceDesc;
-    class SPIBus;
-    class SPIDevice;
-    class SPIDeviceManager;
-    class Storage;
+namespace ChibiOS_K3
+{
+// Real implementations (declared as they land).
+class Semaphore;
+class BinarySemaphore;
+class Scheduler;
+class Util;
+class UARTDriver;
+class IPCUARTDriver;
+class RCOutput;
+class RCInput;
+struct SPIDeviceDesc;
+class SPIBus;
+class SPIDevice;
+class SPIDeviceManager;
+class Storage;
 }

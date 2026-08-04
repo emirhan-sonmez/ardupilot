@@ -669,11 +669,13 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
 
 static HAL_ChibiOS_K3 hal_chibios_k3;
 
-const AP_HAL::HAL& AP_HAL::get_HAL() {
+const AP_HAL::HAL& AP_HAL::get_HAL()
+{
     return hal_chibios_k3;
 }
 
-AP_HAL::HAL& AP_HAL::get_HAL_mutable() {
+AP_HAL::HAL& AP_HAL::get_HAL_mutable()
+{
     return hal_chibios_k3;
 }
 

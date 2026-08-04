@@ -14,7 +14,8 @@
   store is not the onboard 24c32 EEPROM (it shares WKUP_I2C0 with the PMIC)
   and not the SD card (the R5F cannot reach that controller either).
 */
-class ChibiOS_K3::Storage : public AP_HAL::Storage {
+class ChibiOS_K3::Storage : public AP_HAL::Storage
+{
 public:
     void init() override;
     void read_block(void *dst, uint16_t src, size_t n) override;

@@ -46,7 +46,8 @@ extern const AP_HAL::HAL& hal;
       pulse width indefinitely.
 */
 
-namespace {
+namespace
+{
 
 constexpr uint16_t PT_IDLE_US         = 1000;
 constexpr uint16_t PT_MIN_US          = 1000;
@@ -138,8 +139,12 @@ uint16_t g_ch[IB_MIN_CHANNELS] = { 1500, 1500, 1000, 1500, 1000 };
 // HAL_ChibiOS_K3_Class.cpp) -- there is no other backend to be.
 void pt_set(uint8_t out, uint16_t us)
 {
-    if (us < PT_MIN_US) { us = PT_MIN_US; }
-    if (us > PT_MAX_US) { us = PT_MAX_US; }
+    if (us < PT_MIN_US) {
+        us = PT_MIN_US;
+    }
+    if (us > PT_MAX_US) {
+        us = PT_MAX_US;
+    }
     static_cast<ChibiOS_K3::RCOutput *>(hal.rcout)->write_exclusive(out, us);
 }
 
@@ -153,7 +158,8 @@ void pt_all_idle()
 
 }  // namespace
 
-namespace ChibiOS_K3 {
+namespace ChibiOS_K3
+{
 
 void bench_passthrough_update()
 {
@@ -257,7 +263,9 @@ void bench_passthrough_update()
 
         if (armed) {
             if (g_ch[IB_THR] < PT_THR_MIN_GATE_US) {
-                if (thr_low_count < 255) { thr_low_count++; }
+                if (thr_low_count < 255) {
+                    thr_low_count++;
+                }
                 if (thr_low_count >= PT_THR_LOW_DEBOUNCE_TICKS) {
                     // Throttle idle: hold every motor at idle, no mixing --
                     // otherwise a stick alone could raise a motor above
@@ -284,8 +292,12 @@ void bench_passthrough_update()
                                    (y * pt_motor[m].yaw_f)) / 1000;
                     mix = (mix * PT_MIX_GAIN_PCT) / 100;
                     int32_t target = (int32_t)PT_MIN_US + thr_off + mix;
-                    if (target < (int32_t)PT_MIN_US) { target = (int32_t)PT_MIN_US; }
-                    if (target > (int32_t)PT_MAX_US) { target = (int32_t)PT_MAX_US; }
+                    if (target < (int32_t)PT_MIN_US) {
+                        target = (int32_t)PT_MIN_US;
+                    }
+                    if (target > (int32_t)PT_MAX_US) {
+                        target = (int32_t)PT_MAX_US;
+                    }
 
                     // Climb-only slew limit -- see PT_RAMP_US_PER_SEC above.
                     // A drop in target (stick pulled back) is applied

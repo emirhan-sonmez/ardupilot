@@ -43,7 +43,7 @@ void Scheduler::init()
     // and starving the main loop, matching the exact "loops=1 forever"
     // symptom -- setup() completed, one loop() iteration ran, then nothing.
     chThdSetPriority((tprio_t)constrain_int32((int32_t)NORMALPRIO + 10,
-                                               (int32_t)LOWPRIO, (int32_t)HIGHPRIO));
+                     (int32_t)LOWPRIO, (int32_t)HIGHPRIO));
 
     _num_timer_procs = 0;
     _num_io_procs = 0;
@@ -61,11 +61,11 @@ void Scheduler::init()
        still at NORMALPRIO, silently outranking it and starving the main loop to
        a standstill. Anything in the IO tier must stay under main. */
     thread_t *timer_thd = chThdCreateFromHeap(NULL, THD_WORKING_AREA_SIZE(2048),
-                                              "timer",
-                                              (tprio_t)constrain_int32((int32_t)NORMALPRIO + 11,
-                                                                       (int32_t)LOWPRIO,
-                                                                       (int32_t)HIGHPRIO),
-                                              _timer_thread, this);
+                          "timer",
+                          (tprio_t)constrain_int32((int32_t)NORMALPRIO + 11,
+                                  (int32_t)LOWPRIO,
+                                  (int32_t)HIGHPRIO),
+                          _timer_thread, this);
     if (timer_thd == nullptr) {
         trace_printf("rtos: FAILED to create timer thread -- "
                      "register_timer_process() callbacks will NOT run\n");
@@ -74,8 +74,8 @@ void Scheduler::init()
     thread_t *io_thd = chThdCreateFromHeap(NULL, THD_WORKING_AREA_SIZE(4096),
                                            "io",
                                            (tprio_t)constrain_int32((int32_t)NORMALPRIO + 1,
-                                                                    (int32_t)LOWPRIO,
-                                                                    (int32_t)HIGHPRIO),
+                                                   (int32_t)LOWPRIO,
+                                                   (int32_t)HIGHPRIO),
                                            _io_thread, this);
     if (io_thd == nullptr) {
         /* Loud, because this is precisely how Q-32 presented: the vehicle runs
@@ -263,12 +263,12 @@ void Scheduler::_thread_trampoline(void *ctx)
 }
 
 bool Scheduler::thread_create(AP_HAL::MemberProc proc, const char *name,
-                               uint32_t stack_size, priority_base base,
-                               int8_t priority)
+                              uint32_t stack_size, priority_base base,
+                              int8_t priority)
 {
     (void)base;  // TODO: per-class priority tuning once more than one
-                 // thread class (PRIORITY_IO) actually uses thread_create()
-                 // on this board.
+    // thread class (PRIORITY_IO) actually uses thread_create()
+    // on this board.
 
     AP_HAL::MemberProc *tproc = (AP_HAL::MemberProc *)malloc(sizeof(proc));
     if (tproc == nullptr) {
@@ -278,14 +278,14 @@ bool Scheduler::thread_create(AP_HAL::MemberProc proc, const char *name,
     *tproc = proc;
 
     const tprio_t thd_priority = (tprio_t)constrain_int32(
-        (int32_t)NORMALPRIO + priority, (int32_t)LOWPRIO, (int32_t)HIGHPRIO);
+                                     (int32_t)NORMALPRIO + priority, (int32_t)LOWPRIO, (int32_t)HIGHPRIO);
 
     trace_printf("rtos: thread_create(%s) stack=%u prio=%u requested\n",
                  name, (uint32_t)stack_size, (uint32_t)thd_priority);
 
     thread_t *thd = chThdCreateFromHeap(NULL, THD_WORKING_AREA_SIZE(stack_size),
-                                         name, thd_priority,
-                                         _thread_trampoline, tproc);
+                                        name, thd_priority,
+                                        _thread_trampoline, tproc);
     if (thd == nullptr) {
         free(tproc);
         trace_printf("rtos: thread_create(%s) FAILED chThdCreateFromHeap "

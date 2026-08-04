@@ -78,7 +78,8 @@
 
 extern const AP_HAL::HAL& hal;
 
-namespace {
+namespace
+{
 
 // Bank 0
 constexpr uint8_t REG_WHO_AM_I     = 0x00;
@@ -191,9 +192,9 @@ SPIConfig spicfg = {
     .end_cb     = nullptr,
     .speed      = SPI_SPEED_HZ,
     .mode       = 3,                 // CPOL=1 CPHA=1, per the Linux hwdef.
-                                     // NuttX maps CPOL/CPHA to the McSPI
-                                     // POL/PHA bits the same way, so this
-                                     // encoding is not in question.
+    // NuttX maps CPOL/CPHA to the McSPI
+    // POL/PHA bits the same way, so this
+    // encoding is not in question.
     .cs_channel = SPI_CS_CHANNEL,
 };
 
@@ -1180,9 +1181,9 @@ void ChibiOS_K3::bench_imu_update()
     const int32_t gz_mdps = (int32_t)((float)gz * 1000.0f / GYRO_SENSITIVITY);
 
     const bool implausible = xfer_failed ||
-        (gx_mdps > IMU_GYRO_SANITY_MDPS) || (gx_mdps < -IMU_GYRO_SANITY_MDPS) ||
-        (gy_mdps > IMU_GYRO_SANITY_MDPS) || (gy_mdps < -IMU_GYRO_SANITY_MDPS) ||
-        (gz_mdps > IMU_GYRO_SANITY_MDPS) || (gz_mdps < -IMU_GYRO_SANITY_MDPS);
+                             (gx_mdps > IMU_GYRO_SANITY_MDPS) || (gx_mdps < -IMU_GYRO_SANITY_MDPS) ||
+                             (gy_mdps > IMU_GYRO_SANITY_MDPS) || (gy_mdps < -IMU_GYRO_SANITY_MDPS) ||
+                             (gz_mdps > IMU_GYRO_SANITY_MDPS) || (gz_mdps < -IMU_GYRO_SANITY_MDPS);
 
     if (implausible) {
         bad_samples++;

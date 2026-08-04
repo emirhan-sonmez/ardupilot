@@ -18,7 +18,8 @@
   make-integration puts ch.h on the include path.
 */
 
-class ChibiOS_K3::Semaphore : public AP_HAL::Semaphore {
+class ChibiOS_K3::Semaphore : public AP_HAL::Semaphore
+{
 public:
     Semaphore();
     bool give() override;
@@ -29,7 +30,8 @@ protected:
     uint32_t _lock[6];
 };
 
-class ChibiOS_K3::BinarySemaphore : public AP_HAL::BinarySemaphore {
+class ChibiOS_K3::BinarySemaphore : public AP_HAL::BinarySemaphore
+{
 public:
     BinarySemaphore(bool initial_state=false);
 

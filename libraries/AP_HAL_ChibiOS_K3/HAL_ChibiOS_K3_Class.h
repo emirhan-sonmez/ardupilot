@@ -10,7 +10,8 @@
   HAL_Empty. A single instance is created in HAL_ChibiOS_K3_Class.cpp and
   returned by AP_HAL::get_HAL().
 */
-class HAL_ChibiOS_K3 : public AP_HAL::HAL {
+class HAL_ChibiOS_K3 : public AP_HAL::HAL
+{
 public:
     HAL_ChibiOS_K3();
     void run(int argc, char* const* argv, Callbacks* callbacks) const override;

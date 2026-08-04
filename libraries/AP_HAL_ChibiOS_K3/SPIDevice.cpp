@@ -29,8 +29,8 @@ static const SPIDeviceDesc device_table[] = {
     // name        cs  mode  low       high
     { "icm20948",   3,   3,  250000,   250000 },   // onboard IMU
     { "lps22df",    1,   3,  250000,   250000 },   // onboard barometer (Q-05:
-                                                  // ST LPS22DF, not the BMP390
-                                                  // the device tree names)
+    // ST LPS22DF, not the BMP390
+    // the device tree names)
 };
 
 static const uint8_t NUM_DEVICES = ARRAY_SIZE(device_table);
@@ -285,7 +285,7 @@ SPIDevice::SPIDevice(SPIBus &bus, const SPIDeviceDesc &desc) :
 bool SPIDevice::set_speed(AP_HAL::Device::Speed speed)
 {
     _speed_hz = (speed == AP_HAL::Device::SPEED_HIGH) ? _desc.speed_high_hz
-                                                      : _desc.speed_low_hz;
+                : _desc.speed_low_hz;
     return true;
 }
 
@@ -319,7 +319,7 @@ AP_HAL::Device::PeriodicHandle SPIDevice::register_periodic_callback(
 }
 
 bool SPIDevice::adjust_periodic_callback(AP_HAL::Device::PeriodicHandle h,
-                                         uint32_t period_usec)
+        uint32_t period_usec)
 {
     return _bus.adjust_periodic_callback(h, period_usec);
 }

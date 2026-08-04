@@ -13,13 +13,18 @@ using namespace ChibiOS_K3;
 // Peripheral indices. Each eHRPWM backs two channels off one shared time base.
 enum { P_EPWM0 = 0, P_EPWM1 = 1 };
 
-struct periph_desc { uint32_t base; };
+struct periph_desc {
+    uint32_t base;
+};
 static const periph_desc PERIPH[] = {
     { AM67_EPWM0_BASE },
     { AM67_EPWM1_BASE },
 };
 
-struct chan_desc { uint8_t periph; bool output_b; };
+struct chan_desc {
+    uint8_t periph;
+    bool output_b;
+};
 static const chan_desc CHAN[] = {
     { P_EPWM0, false },   // ch0 EHRPWM0_A -> pin 29
     { P_EPWM0, true  },   // ch1 EHRPWM0_B -> pin 8
@@ -198,13 +203,13 @@ void RCOutput::enable_ch(uint8_t chan)
     }
     if (_ch_enabled[chan]) {
         return;                              // already enabled -- callers
-                                              // (Plane's own servo output,
-                                              // this port's retry_pending())
-                                              // call this every cycle, and
-                                              // re-running the body below
-                                              // unconditionally, trace print
-                                              // included, filled the 16 KiB
-                                              // trace buffer within seconds.
+        // (Plane's own servo output,
+        // this port's retry_pending())
+        // call this every cycle, and
+        // re-running the body below
+        // unconditionally, trace print
+        // included, filled the 16 KiB
+        // trace buffer within seconds.
     }
     const chan_desc &c = CHAN[chan];
     if (!ensure_peripheral(c.periph)) {
@@ -223,8 +228,12 @@ void RCOutput::enable_ch(uint8_t chan)
     _ch_enabled[chan] = true;
 
     uint16_t us = _pulse_us[chan];
-    if (us < PWM_MIN_US) { us = PWM_MIN_US; }
-    if (us > PWM_MAX_US) { us = PWM_MAX_US; }
+    if (us < PWM_MIN_US) {
+        us = PWM_MIN_US;
+    }
+    if (us > PWM_MAX_US) {
+        us = PWM_MAX_US;
+    }
     _pulse_us[chan] = us;
     hw_set(chan, us);
     trace_printf("rcout: ch%u enabled -> %u us\n", (uint32_t)chan, (uint32_t)us);
@@ -287,8 +296,12 @@ void RCOutput::park_all_disarmed()
 
 void RCOutput::hw_write(uint8_t chan, uint16_t period_us)
 {
-    if (period_us < PWM_MIN_US) { period_us = PWM_MIN_US; }
-    if (period_us > PWM_MAX_US) { period_us = PWM_MAX_US; }
+    if (period_us < PWM_MIN_US) {
+        period_us = PWM_MIN_US;
+    }
+    if (period_us > PWM_MAX_US) {
+        period_us = PWM_MAX_US;
+    }
     _pulse_us[chan] = period_us;
 
     if (!_ch_enabled[chan]) {

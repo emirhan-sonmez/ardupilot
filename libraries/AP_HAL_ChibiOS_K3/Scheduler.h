@@ -24,7 +24,8 @@
   AP_CANManager, AP_Filesystem, AP_SmartRTL, the telemetry backends, ToneAlarm,
   AP_Camera) fails the same quiet way.
 */
-class ChibiOS_K3::Scheduler : public AP_HAL::Scheduler {
+class ChibiOS_K3::Scheduler : public AP_HAL::Scheduler
+{
 public:
     void init() override;
     void delay(uint16_t ms) override;
@@ -37,8 +38,8 @@ public:
     void reboot(bool hold_in_bootloader = false) override;
     bool in_main_thread() const override;
     bool thread_create(AP_HAL::MemberProc proc, const char *name,
-                        uint32_t stack_size, priority_base base,
-                        int8_t priority) override;
+                       uint32_t stack_size, priority_base base,
+                       int8_t priority) override;
 
 private:
     // Matches AP_HAL_ChibiOS. Nothing on this board comes close to either

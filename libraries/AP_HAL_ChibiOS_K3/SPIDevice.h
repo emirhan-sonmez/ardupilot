@@ -38,7 +38,8 @@ struct ChibiOS_K3::SPIDeviceDesc {
     uint32_t speed_high_hz;
 };
 
-class ChibiOS_K3::SPIBus {
+class ChibiOS_K3::SPIBus
+{
 public:
     ChibiOS_K3::Semaphore semaphore;
 
@@ -87,7 +88,8 @@ private:
     bool     _spi_started = false;
 };
 
-class ChibiOS_K3::SPIDevice : public AP_HAL::SPIDevice {
+class ChibiOS_K3::SPIDevice : public AP_HAL::SPIDevice
+{
 public:
     SPIDevice(ChibiOS_K3::SPIBus &bus, const ChibiOS_K3::SPIDeviceDesc &desc);
 
@@ -108,7 +110,8 @@ private:
     uint32_t _speed_hz;
 };
 
-class ChibiOS_K3::SPIDeviceManager : public AP_HAL::SPIDeviceManager {
+class ChibiOS_K3::SPIDeviceManager : public AP_HAL::SPIDeviceManager
+{
 public:
     AP_HAL::SPIDevice *get_device_ptr(const char *name) override;
     uint8_t get_count() override;

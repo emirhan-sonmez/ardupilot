@@ -10,7 +10,8 @@
   S3+ wires them to a real time source. Only the interface's pure-virtual
   methods are implemented here — the rest use AP_HAL::Util defaults.
 */
-class ChibiOS_K3::Util : public AP_HAL::Util {
+class ChibiOS_K3::Util : public AP_HAL::Util
+{
 public:
     /*
       Real free heap, not AP_HAL::Util's hardcoded 4096. AP_NavEKF3 refuses to

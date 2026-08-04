@@ -1420,9 +1420,9 @@ AP_InertialSensor::detect_backends(void)
         // genuinely zero. No synthetic sensor is registered here, so
         // _gyro_count/_accel_count stay 0 and AP_Arming::ins_checks() still
         // correctly fails -- the vehicle remains unable to arm.
-        #if HAL_GEMSTONE_ALLOW_INIT_NO_INS
+#if HAL_GEMSTONE_ALLOW_INIT_NO_INS
         K3_INS_TRACE("detect_backends: config_error() intentionally skipped, no-INS bench continuation enabled");
-        #elif !AP_INERTIALSENSOR_ALLOW_NO_SENSORS
+#elif !AP_INERTIALSENSOR_ALLOW_NO_SENSORS
         AP_BoardConfig::config_error("INS: unable to initialise driver");
         #endif
         #endif

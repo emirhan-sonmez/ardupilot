@@ -80,12 +80,13 @@ static uint8_t ipc_ready;
   full-ring and resync paths are exactly the kind of thing that is cheap to
   get wrong and expensive to debug over a trace buffer.
 */
-static inline void ipc_dmb(void) {
+static inline void ipc_dmb(void)
+{
 
 #if defined(__arm__) || defined(__aarch64__)
-  __asm volatile ("dmb" ::: "memory");
+    __asm volatile ("dmb" ::: "memory");
 #else
-  __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
 #endif
 }
 
@@ -103,178 +104,189 @@ static inline void ipc_dmb(void) {
   already tolerates via checksums, and it self-heals as soon as the host
   publishes a sane index again.
 */
-static inline uint32_t ipc_used(uint32_t head, uint32_t tail) {
-  uint32_t used = head - tail;
+static inline uint32_t ipc_used(uint32_t head, uint32_t tail)
+{
+    uint32_t used = head - tail;
 
-  if (used > IPC_RING_DATA_SIZE) {
-    return 0U;
-  }
-  return used;
+    if (used > IPC_RING_DATA_SIZE) {
+        return 0U;
+    }
+    return used;
 }
 
-void ipc_ring_init(void) {
-  uint32_t previous_epoch = 0U;
+void ipc_ring_init(void)
+{
+    uint32_t previous_epoch = 0U;
 
-  if (ipc_ready != 0U) {
-    /* AP_SerialManager and GCS_MAVLINK::init() between them open a serial
-       port up to four times during boot. Re-running the reset below under a
-       live daemon would tear the stream, so later calls do nothing.*/
-    return;
-  }
+    if (ipc_ready != 0U) {
+        /* AP_SerialManager and GCS_MAVLINK::init() between them open a serial
+           port up to four times during boot. Re-running the reset below under a
+           live daemon would tear the stream, so later calls do nothing.*/
+        return;
+    }
 
-  /* Read the old epoch before invalidating, so that where the header DID
-     survive (a warm re-init within one firmware load) the value strictly
-     increases instead of looking unchanged.
+    /* Read the old epoch before invalidating, so that where the header DID
+       survive (a warm re-init within one firmware load) the value strictly
+       increases instead of looking unchanged.
 
-     After a remoteproc reload it will not have survived -- the window is
-     zeroed, magic fails this test, and the epoch restarts at 1. That is why
-     epoch is a hint for the Linux side and not its resync trigger: the
-     daemon must key off an invalidated magic, or off a producer index that
-     has fallen behind its own consumer index, both of which are unambiguous.*/
-  if ((hdr->magic == IPC_RING_MAGIC) && (hdr->version == IPC_RING_VERSION)) {
-    previous_epoch = hdr->epoch;
-  }
+       After a remoteproc reload it will not have survived -- the window is
+       zeroed, magic fails this test, and the epoch restarts at 1. That is why
+       epoch is a hint for the Linux side and not its resync trigger: the
+       daemon must key off an invalidated magic, or off a producer index that
+       has fallen behind its own consumer index, both of which are unambiguous.*/
+    if ((hdr->magic == IPC_RING_MAGIC) && (hdr->version == IPC_RING_VERSION)) {
+        previous_epoch = hdr->epoch;
+    }
 
-  /* Invalidate first: a daemon polling right now must not be allowed to read
-     a half-rebuilt header and believe it. */
-  hdr->magic = 0U;
-  ipc_dmb();
+    /* Invalidate first: a daemon polling right now must not be allowed to read
+       a half-rebuilt header and believe it. */
+    hdr->magic = 0U;
+    ipc_dmb();
 
-  hdr->version    = IPC_RING_VERSION;
-  hdr->hdr_size   = IPC_RING_HDR_SIZE;
-  hdr->epoch      = previous_epoch + 1U;
-  hdr->tx_offset  = IPC_RING_TX_OFFSET;
-  hdr->tx_size    = IPC_RING_DATA_SIZE;
-  hdr->rx_offset  = IPC_RING_RX_OFFSET;
-  hdr->rx_size    = IPC_RING_DATA_SIZE;
-  hdr->tx_head    = 0U;
-  hdr->tx_tail    = 0U;
-  hdr->rx_head    = 0U;
-  hdr->rx_tail    = 0U;
-  hdr->tx_refused = 0U;
-  hdr->rx_refused = 0U;
-  hdr->r5f_alive  = 0U;
-  hdr->host_alive = 0U;
+    hdr->version    = IPC_RING_VERSION;
+    hdr->hdr_size   = IPC_RING_HDR_SIZE;
+    hdr->epoch      = previous_epoch + 1U;
+    hdr->tx_offset  = IPC_RING_TX_OFFSET;
+    hdr->tx_size    = IPC_RING_DATA_SIZE;
+    hdr->rx_offset  = IPC_RING_RX_OFFSET;
+    hdr->rx_size    = IPC_RING_DATA_SIZE;
+    hdr->tx_head    = 0U;
+    hdr->tx_tail    = 0U;
+    hdr->rx_head    = 0U;
+    hdr->rx_tail    = 0U;
+    hdr->tx_refused = 0U;
+    hdr->rx_refused = 0U;
+    hdr->r5f_alive  = 0U;
+    hdr->host_alive = 0U;
 
-  /* Everything above must be visible before the magic that declares it
-     valid. */
-  ipc_dmb();
-  hdr->magic = IPC_RING_MAGIC;
+    /* Everything above must be visible before the magic that declares it
+       valid. */
+    ipc_dmb();
+    hdr->magic = IPC_RING_MAGIC;
 
-  ipc_ready = 1U;
+    ipc_ready = 1U;
 
-  trace_printf("AP-K3: ipc ring at %x epoch=%u size=%u/dir\n",
-               (uint32_t)IPC_RING_BASE, hdr->epoch,
-               (uint32_t)IPC_RING_DATA_SIZE);
+    trace_printf("AP-K3: ipc ring at %x epoch=%u size=%u/dir\n",
+                 (uint32_t)IPC_RING_BASE, hdr->epoch,
+                 (uint32_t)IPC_RING_DATA_SIZE);
 }
 
-uint32_t ipc_ring_write(const uint8_t *buf, uint32_t len) {
-  uint32_t head, tail, space, n, i;
+uint32_t ipc_ring_write(const uint8_t *buf, uint32_t len)
+{
+    uint32_t head, tail, space, n, i;
 
-  if (ipc_ready == 0U) {
-    return 0U;
-  }
+    if (ipc_ready == 0U) {
+        return 0U;
+    }
 
-  head  = hdr->tx_head;                 /* ours */
-  tail  = hdr->tx_tail;                 /* host's */
-  space = IPC_RING_DATA_SIZE - ipc_used(head, tail);
+    head  = hdr->tx_head;                 /* ours */
+    tail  = hdr->tx_tail;                 /* host's */
+    space = IPC_RING_DATA_SIZE - ipc_used(head, tail);
 
-  n = (len < space) ? len : space;
+    n = (len < space) ? len : space;
 
-  for (i = 0U; i < n; i++) {
-    tx_data[(head + i) & IPC_RING_DATA_MASK] = buf[i];
-  }
+    for (i = 0U; i < n; i++) {
+        tx_data[(head + i) & IPC_RING_DATA_MASK] = buf[i];
+    }
 
-  /* Payload before index. See the ordering rule in the file header. */
-  ipc_dmb();
-  hdr->tx_head = head + n;
+    /* Payload before index. See the ordering rule in the file header. */
+    ipc_dmb();
+    hdr->tx_head = head + n;
 
-  if (n < len) {
-    hdr->tx_refused += (len - n);
-  }
+    if (n < len) {
+        hdr->tx_refused += (len - n);
+    }
 
-  return n;
+    return n;
 }
 
-uint32_t ipc_ring_read(uint8_t *buf, uint32_t len) {
-  uint32_t head, tail, avail, n, i;
+uint32_t ipc_ring_read(uint8_t *buf, uint32_t len)
+{
+    uint32_t head, tail, avail, n, i;
 
-  if (ipc_ready == 0U) {
-    return 0U;
-  }
+    if (ipc_ready == 0U) {
+        return 0U;
+    }
 
-  head  = hdr->rx_head;                 /* host's */
-  tail  = hdr->rx_tail;                 /* ours */
-  avail = ipc_used(head, tail);
+    head  = hdr->rx_head;                 /* host's */
+    tail  = hdr->rx_tail;                 /* ours */
+    avail = ipc_used(head, tail);
 
-  /* Index before payload: the producer published the index last, so having
-     read it we must not let the payload reads float above it. */
-  ipc_dmb();
+    /* Index before payload: the producer published the index last, so having
+       read it we must not let the payload reads float above it. */
+    ipc_dmb();
 
-  n = (len < avail) ? len : avail;
+    n = (len < avail) ? len : avail;
 
-  for (i = 0U; i < n; i++) {
-    buf[i] = rx_data[(tail + i) & IPC_RING_DATA_MASK];
-  }
+    for (i = 0U; i < n; i++) {
+        buf[i] = rx_data[(tail + i) & IPC_RING_DATA_MASK];
+    }
 
-  ipc_dmb();
-  hdr->rx_tail = tail + n;
+    ipc_dmb();
+    hdr->rx_tail = tail + n;
 
-  return n;
+    return n;
 }
 
-uint32_t ipc_ring_tx_space(void) {
+uint32_t ipc_ring_tx_space(void)
+{
 
-  if (ipc_ready == 0U) {
-    return 0U;
-  }
-  return IPC_RING_DATA_SIZE - ipc_used(hdr->tx_head, hdr->tx_tail);
+    if (ipc_ready == 0U) {
+        return 0U;
+    }
+    return IPC_RING_DATA_SIZE - ipc_used(hdr->tx_head, hdr->tx_tail);
 }
 
-uint32_t ipc_ring_tx_pending(void) {
+uint32_t ipc_ring_tx_pending(void)
+{
 
-  if (ipc_ready == 0U) {
-    return 0U;
-  }
-  return ipc_used(hdr->tx_head, hdr->tx_tail);
+    if (ipc_ready == 0U) {
+        return 0U;
+    }
+    return ipc_used(hdr->tx_head, hdr->tx_tail);
 }
 
-uint32_t ipc_ring_rx_available(void) {
+uint32_t ipc_ring_rx_available(void)
+{
 
-  if (ipc_ready == 0U) {
-    return 0U;
-  }
-  return ipc_used(hdr->rx_head, hdr->rx_tail);
+    if (ipc_ready == 0U) {
+        return 0U;
+    }
+    return ipc_used(hdr->rx_head, hdr->rx_tail);
 }
 
-void ipc_ring_discard_rx(void) {
+void ipc_ring_discard_rx(void)
+{
 
-  if (ipc_ready == 0U) {
-    return;
-  }
-  hdr->rx_tail = hdr->rx_head;
+    if (ipc_ready == 0U) {
+        return;
+    }
+    hdr->rx_tail = hdr->rx_head;
 }
 
-void ipc_ring_tick(void) {
+void ipc_ring_tick(void)
+{
 
-  if (ipc_ready == 0U) {
-    return;
-  }
-  hdr->r5f_alive++;
+    if (ipc_ready == 0U) {
+        return;
+    }
+    hdr->r5f_alive++;
 }
 
-uint32_t ipc_ring_tx_refused(void) {
+uint32_t ipc_ring_tx_refused(void)
+{
 
-  if (ipc_ready == 0U) {
-    return 0U;
-  }
-  return hdr->tx_refused;
+    if (ipc_ready == 0U) {
+        return 0U;
+    }
+    return hdr->tx_refused;
 }
 
-uint32_t ipc_ring_host_alive(void) {
+uint32_t ipc_ring_host_alive(void)
+{
 
-  if (ipc_ready == 0U) {
-    return 0U;
-  }
-  return hdr->host_alive;
+    if (ipc_ready == 0U) {
+        return 0U;
+    }
+    return hdr->host_alive;
 }

@@ -72,89 +72,89 @@
  *          IPC_RING_VERSION.
  */
 typedef struct {
-  volatile uint32_t magic;        /* R5F:  IPC_RING_MAGIC once valid       */
-  volatile uint32_t version;      /* R5F:  IPC_RING_VERSION                */
-  volatile uint32_t hdr_size;     /* R5F:  IPC_RING_HDR_SIZE               */
-  volatile uint32_t epoch;        /* R5F:  bumped on every ipc_ring_init() */
-  volatile uint32_t tx_offset;    /* R5F:  IPC_RING_TX_OFFSET              */
-  volatile uint32_t tx_size;      /* R5F:  IPC_RING_DATA_SIZE              */
-  volatile uint32_t rx_offset;    /* R5F:  IPC_RING_RX_OFFSET              */
-  volatile uint32_t rx_size;      /* R5F:  IPC_RING_DATA_SIZE              */
-  volatile uint32_t tx_head;      /* R5F:   producer index, R5F -> Linux   */
-  volatile uint32_t tx_tail;      /* HOST:  consumer index, R5F -> Linux   */
-  volatile uint32_t rx_head;      /* HOST:  producer index, Linux -> R5F   */
-  volatile uint32_t rx_tail;      /* R5F:   consumer index, Linux -> R5F   */
-  volatile uint32_t tx_refused;   /* R5F:  bytes a caller was NOT given room for */
-  volatile uint32_t rx_refused;   /* HOST: bytes the host could not deliver */
-  volatile uint32_t r5f_alive;    /* R5F:  liveness counter                */
-  volatile uint32_t host_alive;   /* HOST: liveness counter                */
+    volatile uint32_t magic;        /* R5F:  IPC_RING_MAGIC once valid       */
+    volatile uint32_t version;      /* R5F:  IPC_RING_VERSION                */
+    volatile uint32_t hdr_size;     /* R5F:  IPC_RING_HDR_SIZE               */
+    volatile uint32_t epoch;        /* R5F:  bumped on every ipc_ring_init() */
+    volatile uint32_t tx_offset;    /* R5F:  IPC_RING_TX_OFFSET              */
+    volatile uint32_t tx_size;      /* R5F:  IPC_RING_DATA_SIZE              */
+    volatile uint32_t rx_offset;    /* R5F:  IPC_RING_RX_OFFSET              */
+    volatile uint32_t rx_size;      /* R5F:  IPC_RING_DATA_SIZE              */
+    volatile uint32_t tx_head;      /* R5F:   producer index, R5F -> Linux   */
+    volatile uint32_t tx_tail;      /* HOST:  consumer index, R5F -> Linux   */
+    volatile uint32_t rx_head;      /* HOST:  producer index, Linux -> R5F   */
+    volatile uint32_t rx_tail;      /* R5F:   consumer index, Linux -> R5F   */
+    volatile uint32_t tx_refused;   /* R5F:  bytes a caller was NOT given room for */
+    volatile uint32_t rx_refused;   /* HOST: bytes the host could not deliver */
+    volatile uint32_t r5f_alive;    /* R5F:  liveness counter                */
+    volatile uint32_t host_alive;   /* HOST: liveness counter                */
 } ipc_ring_hdr_t;
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-  /**
-   * @brief   Establish the control block and empty both rings.
-   * @details Idempotent per boot: the first call initialises, later calls
-   *          return immediately. That matters because AP_SerialManager and
-   *          GCS_MAVLINK::init() between them call a serial port's begin()
-   *          up to four times during boot, and resetting the indices under a
-   *          live Linux daemon would tear the stream.
-   */
-  void ipc_ring_init(void);
+/**
+ * @brief   Establish the control block and empty both rings.
+ * @details Idempotent per boot: the first call initialises, later calls
+ *          return immediately. That matters because AP_SerialManager and
+ *          GCS_MAVLINK::init() between them call a serial port's begin()
+ *          up to four times during boot, and resetting the indices under a
+ *          live Linux daemon would tear the stream.
+ */
+void ipc_ring_init(void);
 
-  /**
-   * @brief   Queue bytes for Linux.
-   * @return  Number of bytes accepted; may be less than @p len, including 0.
-   *          A short write is reported to the caller, not silently dropped --
-   *          the AP_HAL contract requires callers to cope, and GCS_MAVLink
-   *          checks txspace() first.
-   */
-  uint32_t ipc_ring_write(const uint8_t *buf, uint32_t len);
+/**
+ * @brief   Queue bytes for Linux.
+ * @return  Number of bytes accepted; may be less than @p len, including 0.
+ *          A short write is reported to the caller, not silently dropped --
+ *          the AP_HAL contract requires callers to cope, and GCS_MAVLink
+ *          checks txspace() first.
+ */
+uint32_t ipc_ring_write(const uint8_t *buf, uint32_t len);
 
-  /**
-   * @brief   Take bytes sent by Linux.
-   * @return  Number of bytes copied out, 0 if the ring is empty.
-   */
-  uint32_t ipc_ring_read(uint8_t *buf, uint32_t len);
+/**
+ * @brief   Take bytes sent by Linux.
+ * @return  Number of bytes copied out, 0 if the ring is empty.
+ */
+uint32_t ipc_ring_read(uint8_t *buf, uint32_t len);
 
-  /** @brief  Bytes that ipc_ring_write() would accept right now. */
-  uint32_t ipc_ring_tx_space(void);
+/** @brief  Bytes that ipc_ring_write() would accept right now. */
+uint32_t ipc_ring_tx_space(void);
 
-  /** @brief  Bytes waiting to be read from Linux. */
-  uint32_t ipc_ring_rx_available(void);
+/** @brief  Bytes waiting to be read from Linux. */
+uint32_t ipc_ring_rx_available(void);
 
-  /** @brief  Bytes still queued towards Linux (i.e. not yet consumed). */
-  uint32_t ipc_ring_tx_pending(void);
+/** @brief  Bytes still queued towards Linux (i.e. not yet consumed). */
+uint32_t ipc_ring_tx_pending(void);
 
-  /** @brief  Discard everything Linux has sent but we have not read. */
-  void ipc_ring_discard_rx(void);
+/** @brief  Discard everything Linux has sent but we have not read. */
+void ipc_ring_discard_rx(void);
 
-  /**
-   * @brief   Advance the R5F liveness counter.
-   * @details Called from the periodic health report, not from the data path.
-   *          It is the daemon's only way to tell "firmware stopped" from
-   *          "firmware is running but has nothing to say", which otherwise
-   *          look identical from the Linux side.
-   */
-  void ipc_ring_tick(void);
+/**
+ * @brief   Advance the R5F liveness counter.
+ * @details Called from the periodic health report, not from the data path.
+ *          It is the daemon's only way to tell "firmware stopped" from
+ *          "firmware is running but has nothing to say", which otherwise
+ *          look identical from the Linux side.
+ */
+void ipc_ring_tick(void);
 
-  /**
-   * @brief   Running total of bytes callers were refused for lack of room.
-   * @details Non-zero means the Linux daemon is not draining fast enough, or
-   *          is not running at all. Reported in the periodic health line.
-   */
-  uint32_t ipc_ring_tx_refused(void);
+/**
+ * @brief   Running total of bytes callers were refused for lack of room.
+ * @details Non-zero means the Linux daemon is not draining fast enough, or
+ *          is not running at all. Reported in the periodic health line.
+ */
+uint32_t ipc_ring_tx_refused(void);
 
-  /**
-   * @brief   The host liveness counter, as last written by the daemon.
-   * @details The R5F never writes it. A value that stops changing means the
-   *          bridge died while the firmware kept running -- which looks
-   *          exactly like a Wi-Fi outage from QGC's side, so distinguishing
-   *          them from the trace log is worth the four bytes.
-   */
-  uint32_t ipc_ring_host_alive(void);
+/**
+ * @brief   The host liveness counter, as last written by the daemon.
+ * @details The R5F never writes it. A value that stops changing means the
+ *          bridge died while the firmware kept running -- which looks
+ *          exactly like a Wi-Fi outage from QGC's side, so distinguishing
+ *          them from the trace log is worth the four bytes.
+ */
+uint32_t ipc_ring_host_alive(void);
 
 #ifdef __cplusplus
 }

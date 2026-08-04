@@ -32,9 +32,9 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-  void stack_paint_init(void);
-  uint32_t stack_paint_highwater(void);
-  uint32_t stack_paint_total(void);
+void stack_paint_init(void);
+uint32_t stack_paint_highwater(void);
+uint32_t stack_paint_total(void);
 #ifdef __cplusplus
 }
 #endif

@@ -17,7 +17,8 @@
   it any more, so init() below does -- previously AP_SerialManager's
   serial0->begin() did it as a side effect.
 */
-class ChibiOS_K3::RCInput : public AP_HAL::RCInput {
+class ChibiOS_K3::RCInput : public AP_HAL::RCInput
+{
 public:
     // iBus line rate. Fixed by the protocol, not a parameter. Used both to
     // open SD1 and to tell AP_RCProtocol what the line rate is; the two must
@@ -51,7 +52,10 @@ public:
     // link, a collapse points at wiring or the receiver, and a healthy rate
     // alongside frozen channel values means decode lost sync (dropped bytes)
     // rather than the link going away.
-    uint32_t bytes_seen() const { return _bytes_seen; }
+    uint32_t bytes_seen() const
+    {
+        return _bytes_seen;
+    }
 
 private:
     void *_sd;   // ChibiOS SerialDriver* (SD1)

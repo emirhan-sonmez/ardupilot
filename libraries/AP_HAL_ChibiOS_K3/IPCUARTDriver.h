@@ -26,7 +26,8 @@
   pump: a write lands in DDR immediately and Linux polls for it. Nothing in
   this class can block.
 */
-class ChibiOS_K3::IPCUARTDriver : public AP_HAL::UARTDriver {
+class ChibiOS_K3::IPCUARTDriver : public AP_HAL::UARTDriver
+{
 public:
     IPCUARTDriver();
 

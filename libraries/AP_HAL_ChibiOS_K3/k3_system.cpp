@@ -15,7 +15,8 @@
   the 64-bit helpers use the wrap-free timestamp (CH_CFG_USE_TIMESTAMP).
 */
 
-namespace AP_HAL {
+namespace AP_HAL
+{
 
 void init()
 {

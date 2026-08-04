@@ -62,7 +62,7 @@ bool AP_Compass_AK09916_K3::init()
       the host can address; the AK09916 has no identity on this bus.
     */
     const int32_t dev_id = (int32_t)AP_HAL::Device::make_bus_id(
-        AP_HAL::Device::BUS_TYPE_SPI, 0, 3, DEVTYPE_AK09916);
+                               AP_HAL::Device::BUS_TYPE_SPI, 0, 3, DEVTYPE_AK09916);
 
     if (!register_compass(dev_id)) {
         return false;

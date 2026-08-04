@@ -148,7 +148,7 @@
 #elif CONFIG_HAL_BOARD == HAL_BOARD_QURT
     #include <AP_HAL/board/qurt.h>
 #elif CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS_K3
-    #include <AP_HAL/board/chibios_k3.h>
+#include <AP_HAL/board/chibios_k3.h>
 #else
 #error "Unknown CONFIG_HAL_BOARD type"
 #endif

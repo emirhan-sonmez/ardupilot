@@ -6,7 +6,8 @@
 
 extern const AP_HAL::HAL &hal;
 
-namespace {
+namespace
+{
 
 // Bank 0
 constexpr uint8_t REG_WHO_AM_I   = 0x00;
@@ -111,12 +112,12 @@ constexpr uint16_t SETTLE_US      = 200;
 }  // namespace
 
 AP_InertialSensor_ICM20948_K3::AP_InertialSensor_ICM20948_K3(
-        AP_InertialSensor &imu,
-        AP_HAL::OwnPtr<AP_HAL::SPIDevice> dev,
-        enum Rotation rotation)
+    AP_InertialSensor &imu,
+    AP_HAL::OwnPtr<AP_HAL::SPIDevice> dev,
+    enum Rotation rotation)
     : AP_InertialSensor_Backend(imu)
-    /* Order must match the declaration order in the header, not logical
-       grouping -- the magnetometer members are declared before _dev. */
+      /* Order must match the declaration order in the header, not logical
+         grouping -- the magnetometer members are declared before _dev. */
     , _mag_field(0.0f, 0.0f, 0.0f)
     , _mag_counter(0)
     , _mag_ok(false)
@@ -131,9 +132,9 @@ AP_InertialSensor_ICM20948_K3::AP_InertialSensor_ICM20948_K3(
 }
 
 AP_InertialSensor_Backend *AP_InertialSensor_ICM20948_K3::probe(
-        AP_InertialSensor &imu,
-        AP_HAL::OwnPtr<AP_HAL::SPIDevice> dev,
-        enum Rotation rotation)
+    AP_InertialSensor &imu,
+    AP_HAL::OwnPtr<AP_HAL::SPIDevice> dev,
+    enum Rotation rotation)
 {
     if (!dev) {
         return nullptr;
@@ -212,7 +213,7 @@ bool AP_InertialSensor_ICM20948_K3::aux_master_init()
   magnetometer" and "aux master misconfigured" look identical.
 */
 bool AP_InertialSensor_ICM20948_K3::aux_xfer(uint8_t addr, uint8_t reg,
-                                             uint8_t *value, bool is_read)
+        uint8_t *value, bool is_read)
 {
     uint8_t status = 0;
 
@@ -284,7 +285,7 @@ bool AP_InertialSensor_ICM20948_K3::aux_xfer(uint8_t addr, uint8_t reg,
   which the host then reads as an ordinary register block.
 */
 bool AP_InertialSensor_ICM20948_K3::aux_slv0_stream(uint8_t addr, uint8_t reg,
-                                                    uint8_t len)
+        uint8_t len)
 {
     if (!select_bank(3)) {
         return false;
@@ -335,7 +336,7 @@ bool AP_InertialSensor_ICM20948_K3::aux_read_mag(uint8_t *buf)
 AP_InertialSensor_ICM20948_K3 *AP_InertialSensor_ICM20948_K3::_singleton;
 
 bool AP_InertialSensor_ICM20948_K3::get_mag_field(Vector3f &field,
-                                                  uint32_t &counter) const
+        uint32_t &counter) const
 {
     if (!_mag_ok) {
         return false;

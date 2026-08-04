@@ -11,7 +11,8 @@
   M3 scope: synchronous, blocking _write (reliable bring-up console). A buffered/
   async path can come later.
 */
-class ChibiOS_K3::UARTDriver : public AP_HAL::UARTDriver {
+class ChibiOS_K3::UARTDriver : public AP_HAL::UARTDriver
+{
 public:
     explicit UARTDriver(void *serial_driver);
 
