@@ -5,16 +5,28 @@
 
 /*
   Console UARTDriver for the AM67/K3 board: a thin wrapper over a ChibiOS
-  SerialDriver (SD1 for the 40-pin header console). The SerialDriver pointer is
-  held as an opaque void* so ch.h/hal.h stay out of this header.
+  buffered SIO driver (hal_buffered_sio_c). The driver pointer is held as an
+  opaque void* so ch.h/hal.h stay out of this header.
 
-  M3 scope: synchronous, blocking _write (reliable bring-up console). A buffered/
-  async path can come later.
+  XHAL note: this used to wrap a classic SerialDriver, which XHAL does not
+  have. The nearest equivalent is hal_buffered_sio_c -- a SIODriver plus the
+  software input/output queues and the asynchronous_channel_i that
+  chnWriteTimeout() needs. The caller owns the wrapper and its buffers and
+  hands this class an already-constructed one, exactly as it used to hand over
+  an already-declared SerialDriver.
+
+  Not currently instantiated: DR-016 moved MAVLink to the shared-memory rings
+  and gave UART1 entirely to RCInput, so nothing constructs this today. It is
+  kept because it is the serial backend a SiK telemetry radio on a second UART
+  would use. Anything changed here is therefore compile-verified only.
+
+  M3 scope: synchronous, non-blocking _write (reliable bring-up console). A
+  fully async path can come later.
 */
 class ChibiOS_K3::UARTDriver : public AP_HAL::UARTDriver
 {
 public:
-    explicit UARTDriver(void *serial_driver);
+    explicit UARTDriver(void *buffered_sio);
 
     bool is_initialized() override;
     bool tx_pending() override;
@@ -30,7 +42,7 @@ protected:
     bool _discard_input() override;
 
 private:
-    void *_sd;          // ChibiOS SerialDriver*
+    void *_bsio;        // ChibiOS hal_buffered_sio_c*
     bool _initialized;
 
     // TX diagnostics: bounded, first-few-calls-only (see .cpp). Not a
