@@ -83,7 +83,7 @@ private:
     bool     _thread_started = false;
 
     // Cached controller state, so back-to-back transfers on the same device
-    // do not re-run spiStart(). 0xFF/0 mean "nothing applied yet".
+    // do not re-run drvSetCfgX(). 0xFF/0 mean "nothing applied yet".
     uint8_t  _cur_cs = 0xFF;
     uint8_t  _cur_mode = 0xFF;
     uint32_t _cur_speed = 0;

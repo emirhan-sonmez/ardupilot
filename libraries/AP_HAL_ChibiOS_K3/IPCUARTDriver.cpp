@@ -67,8 +67,8 @@ void IPCUARTDriver::_flush()
 {
     // Nothing to do: a write is already in DDR by the time _write() returns.
     // There is no FIFO, no interrupt and no pump to force (contrast
-    // UARTDriver::_flush(), which must force am67_uart1_tx_pump() because the
-    // THRE interrupt never fires -- Q-26).
+    // UARTDriver::_flush(), which must drain its queue into the UART FIFO by
+    // hand because the THRE interrupt never fires -- Q-26).
 }
 
 uint32_t IPCUARTDriver::_available()

@@ -15,10 +15,11 @@
   WHY NO eCAP. Three eCAP channels (pins 32/36/12) were previously used to
   reach six outputs. The airframe is a quad and needs four, and eCAP is not
   equivalent hardware: a different IP block, a 125 MHz fck against eHRPWM's
-  250 MHz (DR-002), and different shadow-load semantics -- ecap_start() drops
-  the active compare to 0% immediately where ehrpwm_start() does not. Four
-  motors on one peripheral type removes a whole class of asymmetry from the
-  output path. The eCAP driver is left in the ChibiOS tree, unused.
+  250 MHz (DR-002), and different shadow-load semantics -- starting an eCAP
+  instance drops the active compare to 0% immediately where starting an
+  eHRPWM does not. Four motors on one peripheral type removes a whole class
+  of asymmetry from the output path. The eCAP instances are left in the
+  ChibiOS tree as PWMD3..PWMD5 and are disabled in xmcuconf.h.
 
   WHY PIN 8 IS AVAILABLE NOW. It was MAIN_UART1 TX. DR-016 moved MAVLink to
   the shared-memory rings, so RCInput uses only pin 10 (RX), and the stock
@@ -70,10 +71,11 @@ public:
     // 29 and 31. That write programs TBCTL, TBPRD, CMPA and AQCTLA with
     // Linux's own values, and it races this firmware at boot because both
     // remoteproc and gemstone-r5f-setup.service run during the same startup.
-    // TBCTL/TBPRD/CMPCTL were previously written exactly once in
-    // ehrpwm_start() and never revisited, so whichever side wrote last won
-    // permanently. Reasserting all of it makes the R5F unconditionally the
-    // last writer regardless of who got there first.
+    // TBCTL/TBPRD/CMPCTL were once written exactly at peripheral start and
+    // never revisited, so whichever side wrote last won permanently.
+    // Reasserting all of it makes the R5F unconditionally the last writer
+    // regardless of who got there first. Under XHAL the driver does this
+    // itself on every pwmEnableChannel(), so this is now a loop of those.
     void     reassert_outputs();
 
     /*

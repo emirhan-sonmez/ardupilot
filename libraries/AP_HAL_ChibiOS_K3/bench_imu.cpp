@@ -215,7 +215,7 @@ constexpr uint16_t SETTLE_US      = 200;
   Fourteen of those per sample took the main loop from 149 Hz to 49.7 Hz and
   dtmax from 9-11 ms to 23 ms, with the loop paced entirely by the IMU read.
 
-  No delay is needed: spiUnselect()/spiSelect() plus the address byte already
+  No delay is needed: spiUnselectX()/spiSelectX() plus the address byte already
   hold the chip select high far longer than the part's minimum. If a gap ever
   is needed here, it has to be a busy-wait, not a scheduler delay.
 */
