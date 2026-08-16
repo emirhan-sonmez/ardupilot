@@ -4,8 +4,8 @@ Minimal waf tool for the GemstoneO1R5F board (TI AM67/J722S Cortex-R5F).
 
 Unlike chibios.py this does NOT use the STM32 hwdef generator. It builds the
 external AM67 ChibiOS port into libch.a (reusing the exact fragments/flags/linker
-script of the working RT-GEMSTONE-O1-R5F demo, via hwdef/chibios_board.mk) and
-links the ArduPilot objects against it to produce a Cortex-R5F ELF.
+script of the working RT-XHAL-GEMSTONE-O1-R5F demo, via hwdef/chibios_board.mk)
+and links the ArduPilot objects against it to produce a Cortex-R5F ELF.
 
 Link ordering: AP objects reference ChibiOS symbols and ChibiOS crt0 references
 main() (provided by AP), so libch.a is linked AFTER the objects via STLIB
@@ -26,10 +26,16 @@ def configure(cfg):
     env = cfg.env
 
     # Locate the external AM67 ChibiOS port.
+    #
+    # The default moved from ../chibiOS-port/ChibiOS to ../chibios-upstream-work
+    # when this backend was converted to XHAL: the former tree is the frozen
+    # classic-HAL port and no longer has the drivers this board needs. Pointing
+    # GEMSTONE_CHIBIOS_ROOT back at it will fail the libch.a build, not produce
+    # a working classic-HAL image.
     ch_root = os.environ.get('GEMSTONE_CHIBIOS_ROOT', '')
     if not ch_root:
         ch_root = os.path.normpath(
-            os.path.join(cfg.srcnode.abspath(), '..', 'chibiOS-port', 'ChibiOS'))
+            os.path.join(cfg.srcnode.abspath(), '..', 'chibios-upstream-work'))
     if not os.path.isdir(ch_root):
         cfg.fatal('AM67 ChibiOS port not found at %r; set GEMSTONE_CHIBIOS_ROOT'
                   % ch_root)
@@ -61,6 +67,16 @@ def configure(cfg):
     env.CH_K3_INCLUDES = inc_dirs
     env.INCLUDES = list(env.INCLUDES) + inc_dirs
     cfg.msg('ChibiOS include dirs', str(len(inc_dirs)))
+
+    # The same `make pass` writes the defines the ChibiOS fragments contribute.
+    # AP objects include ch.h and hal.h, so they must see the switches libch.a
+    # was built with -- OOP_USE_CHIBIOS in particular, without which
+    # oop_base_object.h reaches for the OSAL header that XHAL removed.
+    ch_defines = [d.strip() for d in
+                  builddir.make_node('defines').read().splitlines() if d.strip()]
+    env.CH_K3_DEFINES = ch_defines
+    env.DEFINES += ch_defines
+    cfg.msg('ChibiOS defines', ' '.join(ch_defines) or 'none')
 
     env.AP_PROGRAM_FEATURES += ['ch_k3_program']
 
