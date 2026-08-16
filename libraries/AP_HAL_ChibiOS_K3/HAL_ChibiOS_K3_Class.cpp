@@ -35,12 +35,11 @@
 #include <AP_AHRS/AP_AHRS.h>               // AP::ahrs(), attitude for the ctl trace line
 #include <SRV_Channel/SRV_Channel.h>       // SRV_Channels::get_emergency_stop()
 #include <AP_Notify/AP_Notify.h>           // AP_Notify::flags.flight_mode
-#include <hal.h>   // for the ChibiOS SerialDriver SD1
+#include <hal.h>   // for the ChibiOS SIO driver SIOD1
 #include "hwdef/boot/trace.h"  // RemoteProc trace buffer (readable without UART)
 #include "hwdef/boot/ipc_ring.h"  // MAVLink transport to Linux (DR-016)
 #include "hwdef/boot/stack_paint.h"  // Q-25: SYS/main-thread stack high-water mark
-#include <am67_mailbox.h>
-#include <am67_wdt.h>   // M9: MCU RTI windowed watchdog  // remoteproc shutdown handshake with Linux
+#include "hwdef/boot/am67_mailbox.h"  // remoteproc shutdown handshake with Linux
 
 // --- driver instances ---
 // serial0 (SERIAL0) carries MAVLink 2, and as of DR-016 it is NOT a physical
@@ -50,17 +49,19 @@
 // because Wi-Fi is SDIO + wl18xx and the R5F cannot reach it.
 //
 // This also settles the pin-10 conflict by removing it. The AM67 port has a
-// single physical UART (SD1 = UART1, header pins 8 TX / 10 RX) and MAVLink
+// single physical UART (SIOD1 = UART1, header pins 8 TX / 10 RX) and MAVLink
 // used to share it with iBus, which meant MAVLink was TX-only -- QGC could
-// never talk back. SD1 now belongs entirely to ChibiOS_K3::RCInput (iBus on
+// never talk back. SIOD1 now belongs entirely to ChibiOS_K3::RCInput (iBus on
 // pin 10) and is no longer an AP_HAL serial port at all. NOTE: that makes
-// RCInput::init() responsible for sdStart()ing it, since AP_SerialManager no
-// longer opens it for us.
+// RCInput::init() responsible for opening it, since AP_SerialManager no
+// longer does so for us. RCInput also owns the buffered-SIO wrapper that
+// supplies the software RX queue -- XHAL's bare SIODriver is FIFO-level only.
 //
 // ChibiOS_K3::UARTDriver is consequently unused right now. It is kept, not
 // deleted: it is the working, hardware-verified serial backend and it is what
 // a SiK telemetry radio on a second UART would use (see [[MAVLink and
-// QGroundControl]] -- Wi-Fi is a bench/config link, not a flight link).
+// QGroundControl]] -- Wi-Fi is a bench/config link, not a flight link). Its
+// XHAL conversion is therefore compile-verified only.
 //
 // serial1-9 have no wired hardware yet -> Empty:: (null) stubs.
 //
@@ -88,7 +89,7 @@ static Empty::AnalogIn analogIn;
    appeared to save and silently did not. */
 static ChibiOS_K3::Storage storageDriver;
 static Empty::GPIO gpioDriver;
-static ChibiOS_K3::RCInput rcinDriver((void *)&SD1);   // real: iBus on SD1 RX, pin 10
+static ChibiOS_K3::RCInput rcinDriver((void *)&SIOD1);  // real: iBus on SIOD1 RX, pin 10
 static ChibiOS_K3::RCOutput rcoutDriver;   // real: channel 0 -> EPWM0_A -> pin 29
 static ChibiOS_K3::Scheduler schedulerInstance;  // real (stub bodies until S3)
 static ChibiOS_K3::Util utilInstance;            // real (stub bodies until S3)
@@ -240,7 +241,7 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
        HAL_BOARD_CHIBIOS` (the stock ChibiOS HAL's board ID, not ours) --
        see board_drivers.cpp. Call it explicitly here instead. */
     rcin->init();
-    trace_printf("AP-K3: rcin->init done (iBus on SD1 RX, pin 10)\n");
+    trace_printf("AP-K3: rcin->init done (iBus on SIOD1 RX, pin 10)\n");
 
     /* PWM safety (M2): SERVOx_FUNCTION defaults to disabled and Storage is
        Empty:: (nothing persists), so SRV_Channels will not touch any output
@@ -322,27 +323,20 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
     spiDeviceManager.baro_ident();
 
     /*
-      M9 step 1: measure RTICLK, do NOT arm.
+      M9 step 1 (the RTICLK measurement) is gone with the classic HAL.
 
-      The DWWD timeout is (PRLD + 1) * 2^13 / RTICLK, and RTICLK for MCU_RTI is
-      set by device-tree clock parents this firmware neither configures nor can
-      read back. Arming against a guessed rate either never fires or resets the
-      board in a loop -- and a reset loop on a board whose only recovery is a
-      physical power cycle (Q-39) is an expensive way to learn the clock.
-      Report it, then arm in a later build with a number rather than a guess.
+      It called am67_wdt_measure_clock(), which no longer exists: the XHAL
+      replacement is the RTIv1 WDG driver, and that is disabled in xhalconf.h
+      because MCU_RTI0 is device-tree "reserved" and nothing issues its TI-SCI
+      clock-enable, so RTICLK is not running at all. The measurement returned
+      0 Hz on every hardware run and the line only ever printed "module not
+      clocked".
+
+      Re-add this as a WDG drvStart() when the RTICLK gap is closed -- the
+      ChibiOS driver already measures the clock itself before arming and
+      refuses rather than guessing, so there is no need for a separate probe
+      step on this side any more.
     */
-    {
-        const uint32_t hz = am67_wdt_measure_clock();
-        if (hz == 0U) {
-            trace_printf("AP-K3: wdt: RTI down-counter did not advance -- "
-                         "module not clocked, or not ours\n");
-        } else {
-            trace_printf("AP-K3: wdt: MCU_RTI clock ~%u Hz, status=%x. "
-                         "1s timeout would need PRLD=%u\n",
-                         hz, am67_wdt_status(),
-                         (uint32_t)((hz / 8192U) - 1U));
-        }
-    }
 
     trace_printf("AP-K3: entering vehicle setup()\n");
     callbacks->setup();
@@ -358,7 +352,7 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
                   loop is free-running.
          thr=     cumulative writes to the AM67 UART1 THR register. Kept, but
                   it no longer says anything about MAVLink: that moved to the
-                  shared-memory rings (DR-016) and SD1 is RX-only for iBus
+                  shared-memory rings (DR-016) and SIOD1 is RX-only for iBus
                   now, so this should sit still. See the mav= line below for
                   link health. */
     for (;;) {
@@ -453,20 +447,24 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
         }
 #endif
 
-        // SD1 TX no longer has a pad at all: MAVLink moved to the rings
+        // SIOD1 TX no longer has a pad at all: MAVLink moved to the rings
         // (DR-016), and as of 2026-08-03 the epwm0-gpio5-gpio14 overlay takes
         // pin 8 for EHRPWM0_B and reconfigures main_uart1 to an RX-only pin
         // group. UART1 is receive-only hardware now -- pin 10, iBus, owned by
         // RCInput.
         //
         // Kept anyway, as a drain rather than a pump: the THRE interrupt does
-        // not fire on this UART (Q-26), so a write to SD1 from anywhere would
+        // not fire on this UART (Q-26), so a write to SIOD1 from anywhere would
         // otherwise fill the TX queue and block its writer forever. With no TX
         // pad those bytes cannot reach a wire either way, so this exists to
         // ensure that mistake fails harmlessly instead of hanging the main
         // loop. A non-zero tx= in the alive line means someone is writing to a
         // port that physically cannot transmit.
-        const uint32_t tx_queued = am67_uart1_tx_pump();
+        //
+        // Now a method on RCInput rather than the classic HAL's
+        // am67_uart1_tx_pump(): under XHAL the software queues belong to the
+        // buffered-SIO wrapper, and RCInput is what owns it.
+        const uint32_t tx_queued = rcinDriver.tx_drain();
 
         static uint32_t loops;
         static uint32_t last_report_ms;
@@ -656,13 +654,20 @@ void HAL_ChibiOS_K3::run(int argc, char* const argv[], Callbacks* callbacks) con
                is the proof that a second writer really was competing, and a
                frozen 0 while the scope dances would mean the competing writer
                is something else and the fix is aimed wrong. */
-            trace_printf("AP-K3: alive t=%ums loops=%u txq=%u pwmblk=%u stackhw=%u/%u uart[notify=%u isr=%u thre=%u fifo=%u deq=%u thr=%u]\n",
+            /* uart[rxq=] replaces the classic driver's per-ISR counters
+               (notify/isr/thre/fifo/deq/thr), which instrumented the AM67
+               serial LLD from the inside and have no XHAL equivalent -- see
+               RCInput::rx_queued(). What is left is the number that actually
+               predicts a failure on this board: bytes waiting in the iBus RX
+               queue. A value climbing toward RX_QUEUE_SIZE is Q-36 in
+               progress, i.e. the main loop is not draining fast enough and the
+               decoder is about to lose sync. A frozen 0 alongside a live
+               receiver means the bytes are not arriving at all. */
+            trace_printf("AP-K3: alive t=%ums loops=%u txq=%u pwmblk=%u stackhw=%u/%u uart[rxq=%u]\n",
                          now_ms, loops, tx_queued,
                          rcoutDriver.foreign_writes_blocked(),
                          stack_paint_highwater(), stack_paint_total(),
-                         am67_uart1_notify_count, am67_uart1_isr_count,
-                         am67_uart1_thre_count, am67_uart1_load_fifo_count,
-                         am67_uart1_bytes_dequeued, am67_uart1_thr_writes);
+                         rcinDriver.rx_queued());
         }
     }
 }
