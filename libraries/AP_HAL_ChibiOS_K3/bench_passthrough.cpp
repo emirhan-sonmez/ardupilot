@@ -5,11 +5,22 @@
 #include "bench_passthrough.h"
 #include "RCOutput.h"           // ChibiOS_K3::RCOutput::write_exclusive()
 #include <AP_RCProtocol/AP_RCProtocol.h>
-#include <hal.h>                // AM67_EPWM0_BASE (board.h)
-#include <am67_epwm.h>          // ehrpwm_read_cmp (shadow readback, diagnostics only)
+#include <hal.h>                // PWMD1, EPWM_CMPA
 #include "hwdef/boot/trace.h"
 
 extern const AP_HAL::HAL& hal;
+
+/*
+  CMPA shadow readback, diagnostics only. XHAL's PWM class exposes no
+  read-back accessors, so this reads the register directly -- the base address
+  comes from the driver object and the offset is the one the driver publishes,
+  so nothing here duplicates knowledge the driver owns. See RCOutput.cpp's
+  epwm_rd16() for the same helper on the driver side.
+*/
+static inline uint16_t epwm0_cmpa_shadow(void)
+{
+    return *(volatile uint16_t *)(PWMD1.base + EPWM_CMPA);
+}
 
 /*
   Bench RC->PWM passthrough for the four quad-X outputs, ported line-for-line
@@ -398,7 +409,7 @@ void bench_passthrough_update()
                  (uint32_t)motor_us[0], (uint32_t)motor_us[1],
                  (uint32_t)motor_us[2], (uint32_t)motor_us[3],
                  (uint32_t)g_ch[IB_ROLL], (uint32_t)g_ch[IB_PITCH], (uint32_t)g_ch[IB_YAW],
-                 (uint32_t)ehrpwm_read_cmp(AM67_EPWM0_BASE, false),
+                 (uint32_t)epwm0_cmpa_shadow(),
                  (uint32_t)AP::RC().num_channels());
 }
 

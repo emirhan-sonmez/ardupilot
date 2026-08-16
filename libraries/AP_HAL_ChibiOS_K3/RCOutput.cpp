@@ -4,8 +4,7 @@
 
 #include "RCOutput.h"
 #include <ch.h>                // chThdSleepMilliseconds
-#include <hal.h>               // AM67_* base addresses (board.h)
-#include <am67_epwm.h>         // generic eHRPWM driver (ChibiOS AM67 port)
+#include <hal.h>               // PWMD1/PWMD2, EPWM_* register offsets
 #include "hwdef/boot/trace.h"  // RemoteProc trace buffer (independent of UART)
 
 using namespace ChibiOS_K3;
@@ -13,12 +12,55 @@ using namespace ChibiOS_K3;
 // Peripheral indices. Each eHRPWM backs two channels off one shared time base.
 enum { P_EPWM0 = 0, P_EPWM1 = 1 };
 
+/*
+  Tick rate handed to the PWM driver. 1 MHz means one tick is one microsecond,
+  so period and pulse width are both written in microseconds and no scaling
+  happens on this side of the driver at all.
+
+  Do NOT try to compensate for the eHRPWM prescaler here. Its divider tree is
+  coarse -- {1,2,4,6,8,10,12,14} x 2^m -- and cannot hit an exact divide to
+  1 MHz from a 250 MHz functional clock, so the driver picks the nearest
+  achievable TBCLK and rescales every period and width write to what it
+  actually reached. That rescaling is why an earlier version of the ChibiOS
+  driver ran 2.44% slow (48.826 Hz instead of 50 Hz) before it was fixed. The
+  caller-facing contract is "ticks at .frequency"; correcting for the hardware
+  a second time here would reintroduce the same error with the sign flipped.
+*/
+static const uint32_t PWM_TICK_HZ = 1000000;
+
 struct periph_desc {
-    uint32_t base;
+    PWMDriver *pwmp;
 };
 static const periph_desc PERIPH[] = {
-    { AM67_EPWM0_BASE },
-    { AM67_EPWM1_BASE },
+    { &PWMD1 },   // EPWM0
+    { &PWMD2 },   // EPWM1
+};
+
+/*
+  Live configuration, one per peripheral. File scope and mutable because XHAL
+  stores the pointer it is given inside the driver and reads it back later, so
+  a local would dangle; per-peripheral rather than shared so changing one
+  instance's period cannot silently rewrite the other's stored configuration.
+*/
+static PWMConfig PWM_CFG[] = {
+    {
+        .frequency = PWM_TICK_HZ,
+        .period = 0,                     // set from _freq_hz before drvStart()
+        .enabled_events = 0,
+        .channels = {
+            { .mode = PWM_OUTPUT_ACTIVE_HIGH },
+            { .mode = PWM_OUTPUT_ACTIVE_HIGH },
+        },
+    },
+    {
+        .frequency = PWM_TICK_HZ,
+        .period = 0,
+        .enabled_events = 0,
+        .channels = {
+            { .mode = PWM_OUTPUT_ACTIVE_HIGH },
+            { .mode = PWM_OUTPUT_ACTIVE_HIGH },
+        },
+    },
 };
 
 struct chan_desc {
@@ -31,6 +73,27 @@ static const chan_desc CHAN[] = {
     { P_EPWM1, false },   // ch2 EHRPWM1_A -> pin 31
     { P_EPWM1, true  },   // ch3 EHRPWM1_B -> pin 33
 };
+
+// XHAL channel index: 0 is output A, 1 is output B.
+static inline pwmchannel_t chan_index(const chan_desc &c)
+{
+    return c.output_b ? 1U : 0U;
+}
+
+/*
+  Direct 16-bit register reads for the diagnostics below.
+
+  XHAL's PWM class has no read-back accessors -- the classic am67_epwm driver's
+  ehrpwm_read_tbctr()/_tbprd()/_cmp() have no equivalent and are not worth
+  proposing upstream, since nothing but a bring-up diagnostic wants them. The
+  base address comes from the driver itself and the offsets are the ones the
+  driver publishes, so this reads the same registers the driver writes rather
+  than duplicating any knowledge about them.
+*/
+static inline uint16_t epwm_rd16(const PWMDriver *pwmp, uint32_t offset)
+{
+    return *(volatile uint16_t *)(pwmp->base + offset);
+}
 
 void RCOutput::init()
 {
@@ -76,10 +139,10 @@ void RCOutput::set_freq(uint32_t chmask, uint16_t freq_hz)
         freq_hz = RCOUTPUT_VERIFIED_FREQ_HZ;
     }
     /*
-      Idempotence guard, 2026-07-30. Re-running ehrpwm_start() on a peripheral
-      already at this frequency is destructive, not free: it writes TBCTR = 0,
-      and resetting the counter part-way through a period stretches or
-      truncates that one period while the pulse width stays put, so the
+      Idempotence guard, 2026-07-30. Re-running the peripheral bring-up when it
+      is already at this frequency is destructive, not free: it writes
+      TBCTR = 0, and resetting the counter part-way through a period stretches
+      or truncates that one period while the pulse width stays put, so the
       measured duty jumps for a cycle. A reset landing just after the CMPA
       match roughly doubles the period -> ~5-7% measured where 10% was
       commanded.
@@ -97,17 +160,27 @@ void RCOutput::set_freq(uint32_t chmask, uint16_t freq_hz)
     }
 
     _freq_hz = freq_hz;
-    // Genuine frequency change: re-program the time base of any already-started
-    // peripheral referenced by the mask, then restore that channel's commanded
-    // pulse width -- the restart above resets the compare registers, and the
-    // caller is entitled to assume set_freq() does not silently change duty.
+    /*
+      Genuine frequency change: re-program the time base of any already-started
+      peripheral referenced by the mask, then restore that channel's commanded
+      pulse width -- the caller is entitled to assume set_freq() does not
+      silently change duty.
+
+      pwmChangePeriod() rather than a restart. The classic driver had no way to
+      change the period without re-running the whole bring-up, which is what the
+      TBCTR = 0 glitch described above came from; this writes TBPRD through its
+      shadow register and leaves the counter alone. The width is still
+      reasserted afterwards because the compare registers are expressed in
+      ticks, and a period change rescales what a given pulse width means.
+    */
     for (uint8_t ch = 0; ch < NUM_CH; ch++) {
         if ((chmask & (1U << ch)) == 0) {
             continue;
         }
         uint8_t p = CHAN[ch].periph;
         if (_p_started[p]) {
-            ehrpwm_start(PERIPH[p].base, _freq_hz);
+            PWM_CFG[p].period = PWM_TICK_HZ / _freq_hz;
+            pwmChangePeriod(PERIPH[p].pwmp, PWM_CFG[p].period);
             if (_ch_enabled[ch]) {
                 hw_set(ch, _pulse_us[ch]);
             }
@@ -127,9 +200,9 @@ bool RCOutput::wait_for_timebase(uint8_t p, uint16_t max_tries)
     // (~5 s, the boot-time safe-init path) vs. max_tries=1 (~5ms, the cheap
     // periodic retry_pending() path) -- see ensure_peripheral().
     for (uint16_t tries = 0; tries < max_tries; tries++) {
-        uint32_t a = ehrpwm_read_tbctr(d.base);
+        uint32_t a = epwm_rd16(d.pwmp, EPWM_TBCTR);
         chThdSleepMilliseconds(5);
-        uint32_t b = ehrpwm_read_tbctr(d.base);
+        uint32_t b = epwm_rd16(d.pwmp, EPWM_TBCTR);
         if (a != b) {
             trace_printf("rcout: periph %u timebase running\n", (uint32_t)p);
             return true;
@@ -163,7 +236,18 @@ bool RCOutput::ensure_peripheral(uint8_t p)
         return false;
     }
     _p_failed[p] = false;
-    ehrpwm_start(PERIPH[p].base, _freq_hz);
+
+    PWM_CFG[p].period = PWM_TICK_HZ / _freq_hz;
+    const msg_t msg = drvStart(PERIPH[p].pwmp, &PWM_CFG[p]);
+    if (msg != HAL_RET_SUCCESS) {
+        // A refused configuration is not a clock failure, so it gets its own
+        // message: treating the two as one cost a bench session on the ChibiOS
+        // side, where a driver reported "started" over a rejected config.
+        trace_printf("rcout: periph %u drvStart REFUSED msg=%d (freq=%u)\n",
+                     (uint32_t)p, (int)msg, (uint32_t)_freq_hz);
+        _p_failed[p] = true;
+        return false;
+    }
     _p_started[p] = true;
     trace_printf("rcout: periph %u started (freq=%u)\n",
                  (uint32_t)p, (uint32_t)_freq_hz);
@@ -181,19 +265,28 @@ void RCOutput::retry_pending()
 
 void RCOutput::reassert_outputs()
 {
+    /*
+      pwmEnableChannel() IS the reassert. The ChibiOS PWMv1 driver rewrites
+      CMPCTL, TBPRD, TBCTL and the channel's action qualifier on every enable
+      precisely so a competing writer -- Linux's pwm-tiehrpwm still owns these
+      registers through its sysfs export -- cannot leave a commanded width in
+      effect for one frame and then silently revert it. So there is no separate
+      "reassert" entry point to call here any more, and re-enabling at the
+      already-commanded width does the same job the classic
+      ehrpwm_out_reassert() did.
+    */
     for (uint8_t chan = 0; chan < NUM_CH; chan++) {
         if (!_ch_enabled[chan]) {
             continue;
         }
-        const chan_desc &c = CHAN[chan];
-        ehrpwm_out_reassert(PERIPH[c.periph].base, c.output_b, _freq_hz);
+        hw_set(chan, _pulse_us[chan]);
     }
 }
 
 void RCOutput::hw_set(uint8_t chan, uint16_t us)
 {
     const chan_desc &c = CHAN[chan];
-    ehrpwm_out_set_pulse_us(PERIPH[c.periph].base, c.output_b, us);
+    pwmEnableChannel(PERIPH[c.periph].pwmp, chan_index(c), (pwmcnt_t)us);
 }
 
 void RCOutput::enable_ch(uint8_t chan)
@@ -224,7 +317,6 @@ void RCOutput::enable_ch(uint8_t chan)
         }
         return;                              // do not enable if clock failed
     }
-    ehrpwm_out_enable(PERIPH[c.periph].base, c.output_b);
     _ch_enabled[chan] = true;
 
     uint16_t us = _pulse_us[chan];
@@ -246,7 +338,7 @@ void RCOutput::disable_ch(uint8_t chan)
     }
     _ch_enabled[chan] = false;
     const chan_desc &c = CHAN[chan];
-    ehrpwm_out_low(PERIPH[c.periph].base, c.output_b);
+    pwmDisableChannel(PERIPH[c.periph].pwmp, chan_index(c));
 }
 
 void RCOutput::set_exclusive_mask(uint32_t mask)
@@ -328,8 +420,9 @@ void RCOutput::hw_write(uint8_t chan, uint16_t period_us)
     // prove what the pin is doing. Do not treat it as pin proof.
     trace_printf("rcout: ch%u=%u us EPWM cmp_shadow=%u tbprd=%u\n",
                  (uint32_t)chan, (uint32_t)period_us,
-                 (uint32_t)ehrpwm_read_cmp(PERIPH[c.periph].base, c.output_b),
-                 (uint32_t)ehrpwm_read_tbprd(PERIPH[c.periph].base));
+                 (uint32_t)epwm_rd16(PERIPH[c.periph].pwmp,
+                                     c.output_b ? EPWM_CMPB : EPWM_CMPA),
+                 (uint32_t)epwm_rd16(PERIPH[c.periph].pwmp, EPWM_TBPRD));
 }
 
 uint16_t RCOutput::read(uint8_t chan)
