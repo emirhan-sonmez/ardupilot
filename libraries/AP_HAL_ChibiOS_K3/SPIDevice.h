@@ -25,9 +25,11 @@
 
   One physical bus, one shared semaphore. Chip select is the McSPI channel
   number (channel n drives the SPI0_CSn pad), so switching device means
-  re-running spiStart() with that device's channel/mode/speed -- done inside
-  the bus lock, which every AP caller already holds via
-  Device::get_semaphore().
+  re-programming the channel with that device's channel/mode/speed -- done
+  inside the bus lock, which every AP caller already holds via
+  Device::get_semaphore(). Under XHAL that is drvSetCfgX() on an
+  already-started driver, not a fresh start; see apply_config() for why the
+  distinction matters with two devices on this bus.
 */
 
 struct ChibiOS_K3::SPIDeviceDesc {

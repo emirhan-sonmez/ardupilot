@@ -16,7 +16,7 @@
   (examples/imu/icm20948.c), keeping its register order and its default
   ranges so a trace line here can be compared directly against that
   program's output on the same board. Only the bus layer differs: spidev
-  ioctls become polled ChibiOS transfers (see the note on spiPolledExchange
+  ioctls become polled ChibiOS transfers (see the note on the polled exchange
   below), and usleep() becomes chThdSleepMilliseconds().
 
   Deliberately NOT an AP_HAL SPIDevice and NOT an AP_InertialSensor
@@ -38,8 +38,8 @@
 
   The ICM-20948's enable line (MCU_GPIO0_12, active low) is asserted from
   here via am67_spi0_imu_enable(), defined in the ChibiOS SPI driver
-  (os/hal/ports/TI/AM67/hal_spi_lld.c) but deliberately not called from
-  spiStart(): it touches MCU_GPIO0, a peripheral neither layer owns.
+  (os/xhal/ports/TI/LLD/MCSPIv1/hal_spi_lld.c) but deliberately not called
+  from spi_lld_start(): it touches MCU_GPIO0, a peripheral neither layer owns.
 */
 
 /*
@@ -188,10 +188,13 @@ constexpr uint8_t IMU_BAD_SAMPLES_TO_RESYNC = 3;
 // about three minutes of visibility. Raise REPORT_INTERVAL_MS if a longer
 // run matters more than resolution.
 
+// .clock_mode, not .mode: XHAL's base SPIConfig already uses `mode` for frame
+// size and the circular/slave flags, so the CPOL/CPHA number lives in its own
+// field. See SPIDevice.cpp's apply_config() on why mixing the two is silent.
 SPIConfig spicfg = {
-    .end_cb     = nullptr,
+    .mode       = 0U,
     .speed      = SPI_SPEED_HZ,
-    .mode       = 3,                 // CPOL=1 CPHA=1, per the Linux hwdef.
+    .clock_mode = 3,                 // CPOL=1 CPHA=1, per the Linux hwdef.
     // NuttX maps CPOL/CPHA to the McSPI
     // POL/PHA bits the same way, so this
     // encoding is not in question.
@@ -226,7 +229,7 @@ uint8_t attempts;
 int8_t current_bank = -1;
 
 /*
-  Every transfer here is polled (spiPolledExchange), never the driver's
+  Every transfer here is polled (spi_lld_polled_exchange), never the driver's
   interrupt-driven spiExchange/spiSend.
 
   spiExchange() sleeps the calling thread until the transfer-complete
@@ -246,7 +249,7 @@ bool xfer_failed;
 
 uint8_t spi_xfer_byte(uint8_t out)
 {
-    const uint8_t in = (uint8_t)spiPolledExchange(&SPID1, out);
+    const uint8_t in = (uint8_t)spi_lld_polled_exchange(&SPID1, out);
     if (SPID1.xfer_timeout) {
         xfer_failed = true;
     }
@@ -255,20 +258,20 @@ uint8_t spi_xfer_byte(uint8_t out)
 
 void spi_read(uint8_t reg, uint8_t *buf, uint8_t len)
 {
-    spiSelect(&SPID1);
+    spiSelectX(&SPID1);
     spi_xfer_byte((uint8_t)(reg | BIT_READ));
     for (uint8_t i = 0; i < len; i++) {
         buf[i] = spi_xfer_byte(0);
     }
-    spiUnselect(&SPID1);
+    spiUnselectX(&SPID1);
 }
 
 void spi_write(uint8_t reg, uint8_t value)
 {
-    spiSelect(&SPID1);
+    spiSelectX(&SPID1);
     spi_xfer_byte(reg);
     spi_xfer_byte(value);
-    spiUnselect(&SPID1);
+    spiUnselectX(&SPID1);
     // Settling time between transactions. The part needs the chip select
     // high for a minimum period, and this costs nothing at bring-up rates.
     hal.scheduler->delay_microseconds(SETTLE_US);
@@ -400,8 +403,15 @@ bool imu_try_bringup()
     }
 
     am67_spi0_imu_enable();
-    spiStart(&SPID1, &spicfg);
+    const msg_t start_msg = drvStart(&SPID1, &spicfg);
     spi_started = true;
+    if (start_msg != HAL_RET_SUCCESS) {
+        if (verbose) {
+            trace_printf("AP-K3: imu: MCSPI0 drvStart failed msg=%d, retrying\n",
+                         (int)start_msg);
+        }
+        return false;
+    }
     if (!SPID1.ready) {
         // Same failure mode as the PWM peripherals: the module never left
         // reset, which on this SoC means its clock is gated because Linux
@@ -899,11 +909,14 @@ void diag_stuck_mask()
 void diag_at_speed(uint32_t speed_hz)
 {
     if (spi_started) {
-        spiStop(&SPID1);
+        drvStop(&SPID1);
         spi_started = false;
     }
     spicfg.speed = speed_hz;
-    spiStart(&SPID1, &spicfg);
+    // Started from STOP, so drvStart() genuinely re-applies the new speed.
+    // It would not on a READY driver: that path only reconfigures when the
+    // config pointer differs, and this one is the same object every time.
+    (void)drvStart(&SPID1, &spicfg);
     spi_started = true;
 
     // The cached bank number describes the part, not the bus, but a speed
@@ -974,7 +987,7 @@ void bus_diag_sweep()
 /*
   TEMP-DIAG(Q-35): read-only A/B for the RX-drain fix.
 
-  Deliberately does not call diag_at_speed(): no spiStop/spiStart, no speed
+  Deliberately does not call diag_at_speed(): no drvStop/drvStart, no speed
   change, no register writes. It reads the part as bring-up left it, so the
   numbers are comparable across boots and the measurement cannot manufacture
   the fault it is looking for.
@@ -1059,7 +1072,9 @@ void ChibiOS_K3::wait_for_imu_bus(uint32_t timeout_ms)
 
     while ((AP_HAL::millis() - start) < timeout_ms) {
         polls++;
-        spiStart(&SPID1, &spicfg);
+        // Idempotent by design: once the driver is READY with this same config
+        // object, drvStart() is a no-op, so re-polling costs nothing.
+        (void)drvStart(&SPID1, &spicfg);
         spi_started = true;
 
         if (SPID1.ready) {
@@ -1125,7 +1140,7 @@ void ChibiOS_K3::bench_imu_update()
         }
         last_retry_ms = now_ms;
         if (spi_started) {
-            spiStop(&SPID1);
+            drvStop(&SPID1);
             spi_started = false;
         }
         current_bank = -1;

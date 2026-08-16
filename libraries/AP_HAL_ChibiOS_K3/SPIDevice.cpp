@@ -4,7 +4,7 @@
 
 #include "SPIDevice.h"
 #include <ch.h>
-#include <hal.h>                // SPID1 = MCU_MCSPI0, SPIConfig
+#include <hal.h>                // SPID1 = MCU_MCSPI0, SPIConfig (XHAL)
 #include <string.h>
 #include "hwdef/boot/trace.h"
 
@@ -37,6 +37,16 @@ static const uint8_t NUM_DEVICES = ARRAY_SIZE(device_table);
 
 // One physical controller, so one bus object shared by every device.
 static SPIBus spi_bus;
+
+/*
+  The live controller configuration. File scope, not a local in apply_config(),
+  because XHAL keeps the pointer: hal_base_driver_c stores it in ->config and
+  the LLD reads it back later (spi_lld_start() and spi_lld_selcfg() both
+  dereference spip->config). A stack-local would leave the driver holding a
+  dangling pointer into a dead frame. Every access is under the bus semaphore,
+  which apply_config()'s callers already hold.
+*/
+static SPIConfig spi_cfg;
 
 /*
   Bus-thread tick. CH_CFG_ST_FREQUENCY is 1000 with CH_CFG_ST_TIMEDELTA 0
@@ -76,13 +86,48 @@ bool SPIBus::apply_config(const SPIDeviceDesc &desc, uint32_t speed_hz)
         return true;
     }
 
-    SPIConfig cfg = {
-        .end_cb     = nullptr,
-        .speed      = speed_hz,
-        .mode       = desc.mode,
-        .cs_channel = desc.cs_channel,
-    };
-    spiStart(&SPID1, &cfg);
+    /*
+      .clock_mode carries the CPOL/CPHA number, NOT .mode.
+
+      XHAL's base SPIConfig already owns a field called `mode` (frame size and
+      the circular/slave flags), so the LLD had to name the clock mode
+      something else. The device table's `mode` column is the CPOL/CPHA number
+      and belongs in .clock_mode; assigning it to .mode instead compiles
+      perfectly and silently runs the bus in the wrong SPI mode. Under the
+      classic HAL these were the same field, which is exactly why this is easy
+      to get wrong when reading the old code.
+    */
+    spi_cfg.mode       = 0U;
+    spi_cfg.speed      = speed_hz;
+    spi_cfg.clock_mode = desc.mode;
+    spi_cfg.cs_channel = desc.cs_channel;
+
+    /*
+      Start once, reconfigure thereafter.
+
+      The classic driver had no separate reconfiguration entry point, so every
+      device switch went through spiStart() and re-ran the whole controller
+      bring-up including a soft reset. With two devices sharing this bus that
+      was measured at ~150 controller resets per second, resetting the
+      barometer out from under its own driver (see spi_lld_setcfg()'s header in
+      the ChibiOS MCSPIv1 driver). drvSetCfgX() reprograms the channel only.
+
+      drvStart() would NOT do here on the reconfiguration path: on an
+      already-READY driver it only re-applies the configuration when the
+      pointer differs from the stored one, and this one never does.
+    */
+    msg_t msg;
+    if (_spi_started) {
+        msg = drvSetCfgX(&SPID1, &spi_cfg);
+    } else {
+        msg = drvStart(&SPID1, &spi_cfg);
+    }
+    if (msg != HAL_RET_SUCCESS) {
+        trace_printf("spi: config rejected, msg=%d (cs=%u mode=%u speed=%u)\n",
+                     (int)msg, (uint32_t)desc.cs_channel,
+                     (uint32_t)desc.mode, speed_hz);
+        return false;
+    }
     if (!SPID1.ready) {
         trace_printf("spi: controller not ready (clock gated? Linux still bound "
                      "to 4b00000.spi?)\n");
@@ -105,7 +150,7 @@ bool SPIBus::apply_config(const SPIDeviceDesc &desc, uint32_t speed_hz)
 }
 
 /*
-  All transfers are polled (spiPolledExchange), never the driver's
+  All transfers are polled (spi_lld_polled_exchange), never the driver's
   interrupt-driven spiExchange().
 
   spiExchange() sleeps the calling thread until the transfer-complete interrupt
@@ -115,6 +160,10 @@ bool SPIBus::apply_config(const SPIDeviceDesc &desc, uint32_t speed_hz)
   first attempt at bench_imu.cpp failed. spi_lld_polled_exchange() busy-waits on
   CHSTAT with a bounded loop and reports SPID1.xfer_timeout, so a dead bus costs
   milliseconds and says so.
+
+  Calling the LLD entry point directly is deliberate, not a layering slip: XHAL
+  has no polled exchange in its public API at all, and the alternative is the
+  unbounded interrupt-driven path described above.
 
   Byte-at-a-time also means no combined tx/rx staging buffer is needed for the
   half-duplex case, unlike AP_HAL_ChibiOS which builds one on the stack sized to
@@ -126,9 +175,9 @@ static bool bus_xfer_bytes(const uint8_t *send, uint32_t send_len,
 {
     bool ok = true;
 
-    spiSelect(&SPID1);
+    spiSelectX(&SPID1);
     for (uint32_t i = 0; i < send_len; i++) {
-        (void)spiPolledExchange(&SPID1, send[i]);
+        (void)spi_lld_polled_exchange(&SPID1, send[i]);
         if (SPID1.xfer_timeout) {
             ok = false;
             break;
@@ -136,14 +185,14 @@ static bool bus_xfer_bytes(const uint8_t *send, uint32_t send_len,
     }
     if (ok) {
         for (uint32_t i = 0; i < recv_len; i++) {
-            recv[i] = (uint8_t)spiPolledExchange(&SPID1, 0);
+            recv[i] = (uint8_t)spi_lld_polled_exchange(&SPID1, 0);
             if (SPID1.xfer_timeout) {
                 ok = false;
                 break;
             }
         }
     }
-    spiUnselect(&SPID1);
+    spiUnselectX(&SPID1);
     return ok;
 }
 
@@ -165,10 +214,10 @@ bool SPIBus::transfer_fullduplex(const uint8_t *send, uint8_t *recv,
 {
     bool ok = true;
 
-    spiSelect(&SPID1);
+    spiSelectX(&SPID1);
     for (uint32_t i = 0; i < len; i++) {
         const uint8_t out = (send != nullptr) ? send[i] : 0;
-        const uint8_t in = (uint8_t)spiPolledExchange(&SPID1, out);
+        const uint8_t in = (uint8_t)spi_lld_polled_exchange(&SPID1, out);
         if (recv != nullptr) {
             recv[i] = in;
         }
@@ -177,7 +226,7 @@ bool SPIBus::transfer_fullduplex(const uint8_t *send, uint8_t *recv,
             break;
         }
     }
-    spiUnselect(&SPID1);
+    spiUnselectX(&SPID1);
     return ok;
 }
 
